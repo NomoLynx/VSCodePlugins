@@ -1,0 +1,17 @@
+# Editor
+.vscode/
+
+# Dependencies
+node_modules/
+
+# Compiled output
+out/
+
+# Lock file
+package-lock.json
+
+# rust target
+target/
+
+# cargo lock
+Cargo.lock

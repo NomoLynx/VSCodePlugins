@@ -1,0 +1,46 @@
+{
+  "name": "rust-keyword-lsp-sample",
+  "displayName": "Rust Keyword LSP Sample",
+  "description": "Sample VS Code extension using a Rust-based LSP server for keyword highlighting.",
+  "version": "0.0.1",
+  "publisher": "sample",
+  "engines": {
+    "vscode": "^1.88.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:rkw"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "rkw",
+        "aliases": [
+          "Rust Keyword Demo",
+          "rkw"
+        ],
+        "extensions": [
+          ".rkw"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "build-server": "cargo build --manifest-path ./server/Cargo.toml",
+    "build-server-release": "cargo build --release --manifest-path ./server/Cargo.toml"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "@types/vscode": "^1.88.0",
+    "typescript": "^5.4.3"
+  }
+}
