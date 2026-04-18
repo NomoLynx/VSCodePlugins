@@ -6,6 +6,9 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
+// const string for LSP name 
+const LSP_NAME: &str = "Rust RiscV LSP";
+
 const KEYWORDS: &[&str] = &[
     "fn", "let", "mut", "if", "else", "return", "match", "while", "for", "in", "struct",
     "enum", "impl", "use", "pub", "mod", "trait", "const", "static", "as", "xxx", "yyy", "zzz",
@@ -36,7 +39,7 @@ impl LanguageServer for Backend {
 
         Ok(InitializeResult {
             server_info: Some(ServerInfo {
-                name: "Rust Keyword LSP Server".to_string(),
+                name: LSP_NAME.to_string(),
                 version: Some("0.1.0".to_string()),
             }),
             capabilities: ServerCapabilities {
@@ -60,7 +63,7 @@ impl LanguageServer for Backend {
 
     async fn initialized(&self, _: InitializedParams) {
         self.client
-            .log_message(MessageType::INFO, "Rust keyword LSP initialized")
+            .log_message(MessageType::INFO, format!("{LSP_NAME}initialized"))
             .await;
     }
 
