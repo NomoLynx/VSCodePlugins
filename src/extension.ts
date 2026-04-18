@@ -30,7 +30,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
 
   const clientOptions: LanguageClientOptions = {
-    documentSelector: [{ scheme: "file", language: "rkw" }],
+    documentSelector: [{ scheme: 'file', language: 'riscvasm' }]
   };
 
   client = new LanguageClient(

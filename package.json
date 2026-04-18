@@ -1,9 +1,9 @@
 {
-  "name": "rust-keyword-lsp-sample",
-  "displayName": "Rust Keyword LSP Sample",
-  "description": "Sample VS Code extension using a Rust-based LSP server for keyword highlighting.",
+  "name": "riscv-language-support",
+  "displayName": "RiscV Language Support",
+  "description": "RiscV Language Support for Visual Studio Code",
   "version": "0.0.1",
-  "publisher": "sample",
+  "publisher": "Tao Liu",
   "engines": {
     "vscode": "^1.88.0"
   },
@@ -11,20 +11,16 @@
     "Programming Languages"
   ],
   "activationEvents": [
-    "onLanguage:rkw"
+     "onLanguage:riscvasm"
   ],
   "main": "./out/extension.js",
   "contributes": {
     "languages": [
       {
-        "id": "rkw",
-        "aliases": [
-          "Rust Keyword Demo",
-          "rkw"
-        ],
-        "extensions": [
-          ".rkw"
-        ],
+        "id": "riscvasm",
+        "aliases": ["riscvasm", "RiscV Assembly"],
+        "extensions": [".rv.s"],
+        "filenames": ["*.rv.s"],
         "configuration": "./language-configuration.json"
       }
     ]
