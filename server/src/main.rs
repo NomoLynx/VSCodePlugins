@@ -8,7 +8,7 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 const KEYWORDS: &[&str] = &[
     "fn", "let", "mut", "if", "else", "return", "match", "while", "for", "in", "struct",
-    "enum", "impl", "use", "pub", "mod", "trait", "const", "static", "as",
+    "enum", "impl", "use", "pub", "mod", "trait", "const", "static", "as", "xxx", "yyy", "zzz",
 ];
 
 #[derive(Debug)]

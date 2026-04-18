@@ -1,3 +1,5 @@
+[workspace]
+
 [package]
 name = "rust_keyword_lsp_server"
 version = "0.1.0"

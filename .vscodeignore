@@ -1,0 +1,35 @@
+# source code (you only need compiled output)
+src/**
+**/*.ts
+
+# dev stuff
+node_modules/**
+.vscode/**
+.git/**
+.gitignore
+
+# build junk
+target/**
+out/test/**
+coverage/**
+
+# docs (optional)
+*.md
+!README.md
+
+# config files you don't need
+tsconfig.json
+.eslintrc*
+
+# remove Rust source
+server/src/**
+server/Cargo.*
+
+# exclude everything
+server/target/**
+
+# include ONLY the release binary
+!server/target/release/rust_keyword_lsp_server.exe
+
+# exclude *.vsix on the root folder
+*.vsix

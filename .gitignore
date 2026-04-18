@@ -15,3 +15,6 @@ target/
 
 # cargo lock
 Cargo.lock
+
+# exclude *.vsix on the root folder
+*.vsix
