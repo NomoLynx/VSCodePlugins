@@ -8,3 +8,9 @@ edition = "2021"
 [dependencies]
 tokio = { version = "1.37", features = ["full"] }
 tower-lsp = "0.20"
+
+# pest
+pest = "*"
+
+# asm lib
+riscv_asm_lib = { path = "../../riscv_asm_lib" }

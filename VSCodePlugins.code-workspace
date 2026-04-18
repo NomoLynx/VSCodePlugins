@@ -1,0 +1,15 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../riscv_asm_lib"
+		}
+	],
+	"settings": {
+    "rust-analyzer.linkedProjects": [
+      "server/Cargo.toml"
+    ]
+  }
+}

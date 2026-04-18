@@ -1,3 +1,6 @@
+pub(crate) mod asm_parser;
+pub(crate) mod lsp_location;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -5,6 +8,8 @@ use tokio::sync::RwLock;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
+
+use lsp_location::*;
 
 // const string for LSP name 
 const LSP_NAME: &str = "Rust RiscV LSP";
@@ -98,44 +103,41 @@ impl LanguageServer for Backend {
         };
 
         let mut data: Vec<SemanticToken> = Vec::new();
-        let mut prev_line: u32 = 0;
-        let mut prev_start: u32 = 0;
+        let mut prev_location = LSPLocation::default();
 
         for (line_index, line) in text.lines().enumerate() {
-            let mut current_col: usize = 0;
+            let mut search_location = LSPLocation {
+                line: line_index as u32,
+                character: 0,
+            };
 
             for word in line.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_') {
                 if word.is_empty() {
                     continue;
                 }
 
-                if let Some(pos) = line[current_col..].find(word) {
-                    let start_col = current_col + pos;
-                    current_col = start_col + word.len();
+                if let Some(pos) = line[search_location.character as usize..].find(word) {
+                    let token_location = LSPLocation {
+                        line: line_index as u32,
+                        character: search_location.character + pos as u32,
+                    };
+                    search_location.character = token_location.character + word.len() as u32;
 
                     if !KEYWORDS.contains(&word) {
                         continue;
                     }
 
-                    let line_u32 = line_index as u32;
-                    let start_u32 = start_col as u32;
-                    let delta_line = line_u32 - prev_line;
-                    let delta_start = if delta_line == 0 {
-                        start_u32 - prev_start
-                    } else {
-                        start_u32
-                    };
+                    let delta = token_location - prev_location;
 
                     data.push(SemanticToken {
-                        delta_line,
-                        delta_start,
+                        delta_line: delta.line,
+                        delta_start: delta.character,
                         length: word.len() as u32,
                         token_type: 0,
                         token_modifiers_bitset: 0,
                     });
 
-                    prev_line = line_u32;
-                    prev_start = start_u32;
+                    prev_location = token_location;
                 }
             }
         }
