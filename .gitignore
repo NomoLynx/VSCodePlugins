@@ -21,3 +21,6 @@ Cargo.lock
 
 #exclude bin folder anywhere in the path
 bin/
+
+#exclude logs folder anywhere in the path
+logs/

@@ -1,8 +1,8 @@
-use riscv_asm_lib::r5asm::r5asm_pest::R5AsmParser;
-use riscv_asm_lib::r5asm::r5asm_pest::Rule;
+use riscv_asm_lib::r5asm::{asm_error::AsmError, asm_program::AsmProgram, assembler::parse_asm, code_gen_config::CodeGenConfiguration};
 
-// use pest::parser::Parser;
-
-pub (crate) fn asm_parse(input:&str) {
-    // R5AsmParser::parse(Rule::asm_prog, input)
+pub (crate) fn asm_parse(input:&str) -> Result<AsmProgram, AsmError> {
+    let mut config = CodeGenConfiguration::default();
+    config.set_replace_pseudo_code(false);
+    let asm_prog = parse_asm(input, &mut config);
+    asm_prog
 }
