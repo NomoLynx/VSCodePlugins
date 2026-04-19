@@ -33,3 +33,9 @@ server/target/**
 
 # exclude *.vsix on the root folder
 *.vsix
+
+#exclude .github folder on the root folder
+.github/
+
+#exclude logs folder under server
+server/logs/
