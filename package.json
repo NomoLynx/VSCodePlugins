@@ -10,9 +10,6 @@
   "categories": [
     "Programming Languages"
   ],
-  "activationEvents": [
-     "onLanguage:riscvasm"
-  ],
   "main": "./out/extension.js",
   "contributes": {
     "languages": [
@@ -22,6 +19,27 @@
         "extensions": [".rv.s"],
         "filenames": ["*.rv.s"],
         "configuration": "./language-configuration.json"
+      }
+    ],
+    "semanticTokenTypes": [
+      {
+        "id": "instruction",
+        "superType": "keyword",
+        "description": "RISC-V instruction mnemonic"
+      },
+      {
+        "id": "register",
+        "superType": "variable",
+        "description": "RISC-V register name"
+      }
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "riscvasm",
+        "scopes": {
+          "instruction": ["keyword.control.assembly"],
+          "register": ["variable.language.register.assembly"]
+        }
       }
     ]
   },

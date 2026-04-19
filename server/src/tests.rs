@@ -1,6 +1,6 @@
 use super::*;
 
-fn decode_token_positions(tokens: &[SemanticToken]) -> Vec<(u32, u32, u32)> {
+fn decode_token_positions(tokens: &[SemanticToken]) -> Vec<(u32, u32, u32, u32)> {
     let mut line = 0;
     let mut start = 0;
     let mut positions = Vec::new();
@@ -12,7 +12,7 @@ fn decode_token_positions(tokens: &[SemanticToken]) -> Vec<(u32, u32, u32)> {
         } else {
             token.delta_start
         };
-        positions.push((line, start, token.length));
+        positions.push((line, start, token.length, token.token_type));
     }
 
     positions
@@ -62,21 +62,21 @@ fn cached_document_state_returns_diagnostics_without_reparsing() {
 }
 
 #[test]
-fn semantic_tokens_use_instruction_name_source_range() {
+fn semantic_tokens_use_instruction_and_register_source_ranges() {
     let state = DocumentState::from_text(".text\naddi x1, x2, 123".to_string());
     let tokens = state.semantic_tokens();
     let positions = decode_token_positions(&tokens);
 
-    assert_eq!(positions, vec![(1, 0, 4)]);
+    assert_eq!(positions, vec![(1, 0, 4, 0), (1, 5, 2, 1), (1, 9, 2, 1)]);
 }
 
 #[test]
-fn semantic_tokens_highlight_only_mnemonic_after_label() {
+fn semantic_tokens_highlight_label_line_with_distinct_register_type() {
     let state = DocumentState::from_text(".text\nloop: c.addi x1, 1".to_string());
     let tokens = state.semantic_tokens();
     let positions = decode_token_positions(&tokens);
 
-    assert_eq!(positions, vec![(1, 6, 6)]);
+    assert_eq!(positions, vec![(1, 6, 6, 0), (1, 13, 2, 1)]);
 }
 
 #[test]

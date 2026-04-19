@@ -20,6 +20,11 @@ use riscv_asm_lib::r5asm::{
 // const string for LSP name 
 const LSP_NAME: &str = "Rust RiscV LSP";
 
+const TOKEN_TYPE_INSTRUCTION: u32 = 0;
+const TOKEN_TYPE_REGISTER: u32 = 1;
+const TOKEN_LEGEND_INSTRUCTION: &str = "instruction";
+const TOKEN_LEGEND_REGISTER: &str = "register";
+
 #[derive(Debug)]
 enum ParseState {
     Parsed(AsmProgram),
@@ -106,20 +111,44 @@ fn collect_parse_diagnostics(text: &str) -> Vec<Diagnostic> {
 }
 
 fn collect_semantic_tokens(program: &AsmProgram) -> Vec<SemanticToken> {
-    let mut ranges = program
-        .get_text_section_items()
-        .into_iter()
-        .filter_map(|item| item.get_inc())
-        .filter_map(|instruction| instruction.get_name_location().copied())
-        .collect::<Vec<_>>();
+    let mut ranges = Vec::new();
 
-    ranges.sort_by_key(|range| (range.start.line, range.start.column, range.end.line, range.end.column));
+    for item in program.get_text_section_items() {
+        let Some(instruction) = item.get_inc() else {
+            continue;
+        };
+
+        if let Some(range) = instruction.get_name_location().copied() {
+            ranges.push((range, TOKEN_TYPE_INSTRUCTION));
+        }
+
+        for register_range in [
+            instruction.get_r0_location().copied(),
+            instruction.get_r1_location().copied(),
+            instruction.get_r2_location().copied(),
+            instruction.get_r3_location().copied(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            ranges.push((register_range, TOKEN_TYPE_REGISTER));
+        }
+    }
+
+    ranges.sort_by_key(|(range, _)| {
+        (
+            range.start.line,
+            range.start.column,
+            range.end.line,
+            range.end.column,
+        )
+    });
 
     let mut data: Vec<SemanticToken> = Vec::with_capacity(ranges.len());
     let mut prev_location = LSPLocation::default();
 
-    for range in ranges {
-        if let Some(token) = semantic_token_from_range(&range, &mut prev_location, 0) {
+    for (range, token_type) in ranges {
+        if let Some(token) = semantic_token_from_range(&range, &mut prev_location, token_type) {
             data.push(token);
         }
     }
@@ -253,7 +282,10 @@ fn parse_line_and_character(message: &str) -> Option<(u32, u32)> {
 impl LanguageServer for Backend {
     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
         let legend = SemanticTokensLegend {
-            token_types: vec![SemanticTokenType::KEYWORD],
+            token_types: vec![
+                SemanticTokenType::new(TOKEN_LEGEND_INSTRUCTION),
+                SemanticTokenType::new(TOKEN_LEGEND_REGISTER),
+            ],
             token_modifiers: vec![],
         };
 
