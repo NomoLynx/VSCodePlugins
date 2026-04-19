@@ -1,5 +1,6 @@
 import * as path from "path";
 import * as vscode from "vscode";
+import * as fs from "fs";
 import {
   Executable,
   LanguageClient,
@@ -16,9 +17,26 @@ function serverBinaryName(): string {
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
-  const serverPath = context.asAbsolutePath(
-    path.join("server", "target", "release", serverBinaryName())
+
+  const serverPath = path.join(
+    context.extensionPath,
+    "server",
+    "target",
+    "release",
+    serverBinaryName()
   );
+
+  // ✅ STEP 1: print paths
+  console.log("RiscV LSP EXTENSION PATH:", context.extensionPath);
+  console.log("RiscV LSP SERVER PATH:", serverPath);
+
+  // ✅ STEP 2: check if file exists
+  if (!fs.existsSync(serverPath)) {
+    vscode.window.showErrorMessage("❌ RiscV LSP binary NOT FOUND: " + serverPath);
+    return;
+  } else {
+    vscode.window.showInformationMessage("✅ RiscV LSP binary FOUND");
+  }
 
   const run: Executable = {
     command: serverPath,
@@ -30,7 +48,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
 
   const clientOptions: LanguageClientOptions = {
-    documentSelector: [{ scheme: 'file', language: 'riscvasm' }],
+    documentSelector: [{ scheme: "file", language: "riscvasm" }],
     outputChannelName: "RISC-V LSP",
   };
 
@@ -44,11 +62,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   console.log("RISC-V extension starting...");
 
   try {
-    context.subscriptions.push(client);
     await client.start();
+    vscode.window.showInformationMessage("✅ RiscV LSP started");
   } catch (err) {
-    console.error("Failed to start LSP:", err);
+    vscode.window.showErrorMessage("❌ Failed to start RiscV LSP: " + err);
+    console.error(err);
   }
+
+  // ✅ IMPORTANT
+  context.subscriptions.push(client);
 }
 
 export async function deactivate(): Promise<void> {

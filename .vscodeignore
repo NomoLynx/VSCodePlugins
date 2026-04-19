@@ -3,10 +3,12 @@ src/**
 **/*.ts
 
 # dev stuff
-node_modules/**
 .vscode/**
 .git/**
 .gitignore
+
+# ⚠️ DO NOT exclude node_modules (you need runtime deps)
+# node_modules/**   <-- REMOVE THIS LINE
 
 # build junk
 target/**
@@ -25,22 +27,24 @@ tsconfig.json
 server/src/**
 server/Cargo.*
 
-# exclude everything
+# exclude everything in target
 server/target/**
 
 # include ONLY the release binary
+!server/target/release/
 !server/target/release/rust_keyword_lsp_server.exe
 
 # exclude *.vsix on the root folder
 *.vsix
 
-#exclude .github folder on the root folder
+# exclude .github folder on the root folder
 .github/
 
-#exclude logs folder under server
+# exclude logs folder under server
 server/logs/
 
-#exclude VSCodePlugins.code-workspace file on the root folder
+# exclude VSCodePlugins.code-workspace file on the root folder
 VSCodePlugins.code-workspace
 
+# remove extra icon
 icon2.png
