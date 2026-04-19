@@ -11,7 +11,10 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 use asm_parser::asm_parse;
 use lsp_location::*;
-use riscv_asm_lib::r5asm::asm_error::{AsmError, AsmErrorSourceFileLocation};
+use riscv_asm_lib::r5asm::{
+    asm_error::{AsmError, AsmErrorSourceFileLocation},
+    asm_program::AsmProgram,
+};
 
 // const string for LSP name 
 const LSP_NAME: &str = "Rust RiscV LSP";
@@ -22,40 +25,135 @@ const KEYWORDS: &[&str] = &[
 ];
 
 #[derive(Debug)]
+enum ParseState {
+    Parsed(AsmProgram),
+    Error(AsmError),
+    Panic(String),
+}
+
+#[derive(Debug)]
+struct DocumentState {
+    text: String,
+    parse_state: ParseState,
+}
+
+impl DocumentState {
+    fn from_text(text: String) -> Self {
+        let parse_state = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| asm_parse(&text))) {
+            Ok(Ok(program)) => ParseState::Parsed(program),
+            Ok(Err(err)) => ParseState::Error(err),
+            Err(_) => ParseState::Panic("Internal parser panic while producing diagnostics".to_string()),
+        };
+
+        Self { text, parse_state }
+    }
+
+    fn diagnostics(&self) -> Vec<Diagnostic> {
+        match &self.parse_state {
+            ParseState::Parsed(_) => Vec::new(),
+            ParseState::Error(err) => vec![build_error_diagnostic(&self.text, err)],
+            ParseState::Panic(message) => vec![Diagnostic {
+                range: fallback_diagnostic_range(&self.text, Some(message)),
+                severity: Some(DiagnosticSeverity::ERROR),
+                source: Some(LSP_NAME.to_string()),
+                message: message.clone(),
+                ..Diagnostic::default()
+            }],
+        }
+    }
+
+    fn semantic_tokens(&self) -> Vec<SemanticToken> {
+        match &self.parse_state {
+            ParseState::Parsed(_program) => collect_semantic_tokens(&self.text),
+            ParseState::Error(_) | ParseState::Panic(_) => collect_semantic_tokens(&self.text),
+        }
+    }
+}
+
+#[derive(Debug)]
 struct Backend {
     client: Client,
-    docs: Arc<RwLock<HashMap<Url, String>>>,
+    documents: Arc<RwLock<HashMap<Url, DocumentState>>>,
 }
 
 impl Backend {
     fn new(client: Client) -> Self {
         Self {
             client,
-            docs: Arc::new(RwLock::new(HashMap::new())),
+            documents: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    async fn publish_parse_diagnostics(&self, uri: Url, text: String) {
-        let diagnostics = collect_parse_diagnostics(&text);
+    async fn update_document(&self, uri: Url, text: String) {
+        let state = DocumentState::from_text(text);
+
+        let mut documents = self.documents.write().await;
+        documents.insert(uri, state);
+    }
+
+    async fn publish_parse_diagnostics(&self, uri: Url) {
+        let diagnostics = {
+            let documents = self.documents.read().await;
+            documents
+                .get(&uri)
+                .map(DocumentState::diagnostics)
+                .unwrap_or_default()
+        };
+
         self.client.publish_diagnostics(uri, diagnostics, None).await;
     }
 }
 
+#[cfg(test)]
 fn collect_parse_diagnostics(text: &str) -> Vec<Diagnostic> {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| asm_parse(text))) {
-        Ok(Ok(_)) => Vec::new(),
-        Ok(Err(err)) => vec![build_error_diagnostic(text, err)],
-        Err(_) => vec![Diagnostic {
-            range: fallback_diagnostic_range(text, Some("Internal parser panic while producing diagnostics")),
-            severity: Some(DiagnosticSeverity::ERROR),
-            source: Some(LSP_NAME.to_string()),
-            message: "Internal parser panic while producing diagnostics".to_string(),
-            ..Diagnostic::default()
-        }],
-    }
+    DocumentState::from_text(text.to_string()).diagnostics()
 }
 
-fn build_error_diagnostic(text: &str, err: AsmError) -> Diagnostic {
+fn collect_semantic_tokens(text: &str) -> Vec<SemanticToken> {
+    let mut data: Vec<SemanticToken> = Vec::new();
+    let mut prev_location = LSPLocation::default();
+
+    for (line_index, line) in text.lines().enumerate() {
+        let mut search_location = LSPLocation {
+            line: line_index as u32,
+            character: 0,
+        };
+
+        for word in line.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_') {
+            if word.is_empty() {
+                continue;
+            }
+
+            if let Some(pos) = line[search_location.character as usize..].find(word) {
+                let token_location = LSPLocation {
+                    line: line_index as u32,
+                    character: search_location.character + pos as u32,
+                };
+                search_location.character = token_location.character + word.len() as u32;
+
+                if !KEYWORDS.contains(&word) {
+                    continue;
+                }
+
+                let delta = token_location - prev_location;
+
+                data.push(SemanticToken {
+                    delta_line: delta.line,
+                    delta_start: delta.character,
+                    length: word.len() as u32,
+                    token_type: 0,
+                    token_modifiers_bitset: 0,
+                });
+
+                prev_location = token_location;
+            }
+        }
+    }
+
+    data
+}
+
+fn build_error_diagnostic(text: &str, err: &AsmError) -> Diagnostic {
     let mut message = err.get_error_message();
     let range = match err.get_error_location() {
         Some(location) => {
@@ -192,12 +290,8 @@ impl LanguageServer for Backend {
         let uri = params.text_document.uri;
         let text = params.text_document.text;
 
-        {
-            let mut docs = self.docs.write().await;
-            docs.insert(uri.clone(), text.clone());
-        }
-
-        self.publish_parse_diagnostics(uri, text).await;
+        self.update_document(uri.clone(), text).await;
+        self.publish_parse_diagnostics(uri).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -205,12 +299,8 @@ impl LanguageServer for Backend {
             let uri = params.text_document.uri;
             let text = change.text;
 
-            {
-                let mut docs = self.docs.write().await;
-                docs.insert(uri.clone(), text.clone());
-            }
-
-            self.publish_parse_diagnostics(uri, text).await;
+            self.update_document(uri.clone(), text).await;
+            self.publish_parse_diagnostics(uri).await;
         }
     }
 
@@ -218,8 +308,8 @@ impl LanguageServer for Backend {
         let uri = params.text_document.uri;
 
         {
-            let mut docs = self.docs.write().await;
-            docs.remove(&uri);
+            let mut documents = self.documents.write().await;
+            documents.remove(&uri);
         }
 
         self.client.publish_diagnostics(uri, Vec::new(), None).await;
@@ -229,50 +319,14 @@ impl LanguageServer for Backend {
         &self,
         params: SemanticTokensParams,
     ) -> Result<Option<SemanticTokensResult>> {
-        let docs = self.docs.read().await;
-        let Some(text) = docs.get(&params.text_document.uri) else {
-            return Ok(None);
-        };
-
-        let mut data: Vec<SemanticToken> = Vec::new();
-        let mut prev_location = LSPLocation::default();
-
-        for (line_index, line) in text.lines().enumerate() {
-            let mut search_location = LSPLocation {
-                line: line_index as u32,
-                character: 0,
+        let data = {
+            let documents = self.documents.read().await;
+            let Some(state) = documents.get(&params.text_document.uri) else {
+                return Ok(None);
             };
 
-            for word in line.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_') {
-                if word.is_empty() {
-                    continue;
-                }
-
-                if let Some(pos) = line[search_location.character as usize..].find(word) {
-                    let token_location = LSPLocation {
-                        line: line_index as u32,
-                        character: search_location.character + pos as u32,
-                    };
-                    search_location.character = token_location.character + word.len() as u32;
-
-                    if !KEYWORDS.contains(&word) {
-                        continue;
-                    }
-
-                    let delta = token_location - prev_location;
-
-                    data.push(SemanticToken {
-                        delta_line: delta.line,
-                        delta_start: delta.character,
-                        length: word.len() as u32,
-                        token_type: 0,
-                        token_modifiers_bitset: 0,
-                    });
-
-                    prev_location = token_location;
-                }
-            }
-        }
+            state.semantic_tokens()
+        };
 
         Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
             result_id: None,
@@ -282,43 +336,7 @@ impl LanguageServer for Backend {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn extracts_position_from_pest_message() {
-        let position = parse_line_and_character("error @ Pos((3, 7))").expect("should extract position");
-        assert_eq!(position, (2, 6));
-    }
-
-    #[test]
-    fn invalid_input_produces_error_diagnostic() {
-        let diagnostics = collect_parse_diagnostics("bad <<");
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].severity, Some(DiagnosticSeverity::ERROR));
-        assert!(diagnostics[0].message.contains("Parsing") || diagnostics[0].message.contains("GeneralError"));
-    }
-
-    #[test]
-    fn parser_message_line_six_maps_to_vscode_line_five() {
-        let text = "a\nb\nc\nd\ne\nfn efg {\n";
-        let location = AsmErrorSourceFileLocation("dummy.rs".to_string(), 6);
-
-        let range = diagnostic_range_from_error_location(text, &location);
-
-        assert_eq!(range.start.line, 5);
-    }
-
-    #[test]
-    fn out_of_range_location_clamps_to_last_line() {
-        let text = "a\nb\nc\n";
-        let location = AsmErrorSourceFileLocation("dummy.rs".to_string(), 99);
-
-        let range = diagnostic_range_from_error_location(text, &location);
-
-        assert_eq!(range.start.line, 2);
-    }
-}
+mod tests;
 
 #[tokio::main]
 async fn main() {
