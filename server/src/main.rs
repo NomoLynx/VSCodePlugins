@@ -21,7 +21,7 @@ const LSP_NAME: &str = "Rust RiscV LSP";
 
 const KEYWORDS: &[&str] = &[
     "fn", "let", "mut", "if", "else", "return", "match", "while", "for", "in", "struct",
-    "enum", "impl", "use", "pub", "mod", "trait", "const", "static", "as", "xxx", "yyy", "zzz",
+    "enum", "impl", "use", "pub", "mod", "trait", "const", "static", "as",
 ];
 
 #[derive(Debug)]

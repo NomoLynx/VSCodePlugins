@@ -10,6 +10,9 @@
 	"settings": {
     "rust-analyzer.linkedProjects": [
       "server/Cargo.toml"
-    ]
+	],
+	"chat.tools.terminal.autoApprove": {
+		"cargo test": true
+	}
   }
 }

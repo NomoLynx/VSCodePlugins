@@ -34,8 +34,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
 
   client = new LanguageClient(
-    "rustKeywordLsp",
-    "Rust Keyword LSP",
+    "rustRiscVLsp",
+    "Rust RiscV LSP",
     serverOptions,
     clientOptions
   );
