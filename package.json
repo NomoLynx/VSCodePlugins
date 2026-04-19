@@ -10,15 +10,25 @@
   "categories": [
     "Programming Languages"
   ],
+  "activationEvents": [
+    "onLanguage:riscvasm"
+  ],
   "main": "./out/extension.js",
   "icon": "icon.png",
   "contributes": {
     "languages": [
       {
         "id": "riscvasm",
-        "aliases": ["riscvasm", "RiscV Assembly"],
-        "extensions": [".rv.s"],
-        "filenames": ["*.rv.s"],
+        "aliases": [
+          "riscvasm",
+          "RiscV Assembly"
+        ],
+        "extensions": [
+          ".rv.s"
+        ],
+        "filenames": [
+          "*.rv.s"
+        ],
         "configuration": "./language-configuration.json"
       }
     ],
@@ -38,8 +48,12 @@
       {
         "language": "riscvasm",
         "scopes": {
-          "instruction": ["keyword.control.assembly"],
-          "register": ["variable.language.register.assembly"]
+          "instruction": [
+            "keyword.control.assembly"
+          ],
+          "register": [
+            "variable.language.register.assembly"
+          ]
         }
       }
     ]
@@ -54,7 +68,7 @@
     "vscode-languageclient": "^9.0.1"
   },
   "devDependencies": {
-    "@types/node": "^20.11.30",
+    "@types/node": "^20.19.39",
     "@types/vscode": "^1.88.0",
     "typescript": "^5.4.3"
   }

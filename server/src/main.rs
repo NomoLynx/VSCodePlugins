@@ -315,7 +315,7 @@ impl LanguageServer for Backend {
 
     async fn initialized(&self, _: InitializedParams) {
         self.client
-            .log_message(MessageType::INFO, format!("{LSP_NAME}initialized"))
+            .log_message(MessageType::INFO, format!("{LSP_NAME} initialized"))
             .await;
     }
 

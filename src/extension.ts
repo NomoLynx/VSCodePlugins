@@ -17,7 +17,7 @@ function serverBinaryName(): string {
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const serverPath = context.asAbsolutePath(
-    path.join("server", "target", "debug", serverBinaryName())
+    path.join("server", "target", "release", serverBinaryName())
   );
 
   const run: Executable = {
@@ -30,7 +30,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
 
   const clientOptions: LanguageClientOptions = {
-    documentSelector: [{ scheme: 'file', language: 'riscvasm' }]
+    documentSelector: [{ scheme: 'file', language: 'riscvasm' }],
+    outputChannelName: "RISC-V LSP",
   };
 
   client = new LanguageClient(
@@ -40,7 +41,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     clientOptions
   );
 
-  await client.start();
+  console.log("RISC-V extension starting...");
+
+  try {
+    context.subscriptions.push(client);
+    await client.start();
+  } catch (err) {
+    console.error("Failed to start LSP:", err);
+  }
 }
 
 export async function deactivate(): Promise<void> {

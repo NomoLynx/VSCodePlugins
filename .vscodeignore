@@ -39,3 +39,8 @@ server/target/**
 
 #exclude logs folder under server
 server/logs/
+
+#exclude VSCodePlugins.code-workspace file on the root folder
+VSCodePlugins.code-workspace
+
+icon2.png
