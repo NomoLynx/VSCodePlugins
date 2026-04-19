@@ -14,15 +14,11 @@ use lsp_location::*;
 use riscv_asm_lib::r5asm::{
     asm_error::{AsmError, AsmErrorSourceFileLocation},
     asm_program::AsmProgram,
+    instruction::SourceRange,
 };
 
 // const string for LSP name 
 const LSP_NAME: &str = "Rust RiscV LSP";
-
-const KEYWORDS: &[&str] = &[
-    "fn", "let", "mut", "if", "else", "return", "match", "while", "for", "in", "struct",
-    "enum", "impl", "use", "pub", "mod", "trait", "const", "static", "as",
-];
 
 #[derive(Debug)]
 enum ParseState {
@@ -64,8 +60,8 @@ impl DocumentState {
 
     fn semantic_tokens(&self) -> Vec<SemanticToken> {
         match &self.parse_state {
-            ParseState::Parsed(_program) => collect_semantic_tokens(&self.text),
-            ParseState::Error(_) | ParseState::Panic(_) => collect_semantic_tokens(&self.text),
+            ParseState::Parsed(program) => collect_semantic_tokens(program),
+            ParseState::Error(_) | ParseState::Panic(_) => Vec::new(),
         }
     }
 }
@@ -109,48 +105,57 @@ fn collect_parse_diagnostics(text: &str) -> Vec<Diagnostic> {
     DocumentState::from_text(text.to_string()).diagnostics()
 }
 
-fn collect_semantic_tokens(text: &str) -> Vec<SemanticToken> {
-    let mut data: Vec<SemanticToken> = Vec::new();
+fn collect_semantic_tokens(program: &AsmProgram) -> Vec<SemanticToken> {
+    let mut ranges = program
+        .get_text_section_items()
+        .into_iter()
+        .filter_map(|item| item.get_inc())
+        .filter_map(|instruction| instruction.get_name_location().copied())
+        .collect::<Vec<_>>();
+
+    ranges.sort_by_key(|range| (range.start.line, range.start.column, range.end.line, range.end.column));
+
+    let mut data: Vec<SemanticToken> = Vec::with_capacity(ranges.len());
     let mut prev_location = LSPLocation::default();
 
-    for (line_index, line) in text.lines().enumerate() {
-        let mut search_location = LSPLocation {
-            line: line_index as u32,
-            character: 0,
-        };
-
-        for word in line.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_') {
-            if word.is_empty() {
-                continue;
-            }
-
-            if let Some(pos) = line[search_location.character as usize..].find(word) {
-                let token_location = LSPLocation {
-                    line: line_index as u32,
-                    character: search_location.character + pos as u32,
-                };
-                search_location.character = token_location.character + word.len() as u32;
-
-                if !KEYWORDS.contains(&word) {
-                    continue;
-                }
-
-                let delta = token_location - prev_location;
-
-                data.push(SemanticToken {
-                    delta_line: delta.line,
-                    delta_start: delta.character,
-                    length: word.len() as u32,
-                    token_type: 0,
-                    token_modifiers_bitset: 0,
-                });
-
-                prev_location = token_location;
-            }
+    for range in ranges {
+        if let Some(token) = semantic_token_from_range(&range, &mut prev_location, 0) {
+            data.push(token);
         }
     }
 
     data
+}
+
+fn semantic_token_from_range(
+    range: &SourceRange,
+    prev_location: &mut LSPLocation,
+    token_type: u32,
+) -> Option<SemanticToken> {
+    if range.start.line == 0 || range.start.column == 0 {
+        return None;
+    }
+
+    let token_location = LSPLocation {
+        line: range.start.line.saturating_sub(1) as u32,
+        character: range.start.column.saturating_sub(1) as u32,
+    };
+    let length = range.end.column.saturating_sub(range.start.column) as u32;
+
+    if length == 0 {
+        return None;
+    }
+
+    let delta = token_location - *prev_location;
+    *prev_location = token_location;
+
+    Some(SemanticToken {
+        delta_line: delta.line,
+        delta_start: delta.character,
+        length,
+        token_type,
+        token_modifiers_bitset: 0,
+    })
 }
 
 fn build_error_diagnostic(text: &str, err: &AsmError) -> Diagnostic {

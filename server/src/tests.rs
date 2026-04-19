@@ -1,5 +1,23 @@
 use super::*;
 
+fn decode_token_positions(tokens: &[SemanticToken]) -> Vec<(u32, u32, u32)> {
+    let mut line = 0;
+    let mut start = 0;
+    let mut positions = Vec::new();
+
+    for token in tokens {
+        line += token.delta_line;
+        start = if token.delta_line == 0 {
+            start + token.delta_start
+        } else {
+            token.delta_start
+        };
+        positions.push((line, start, token.length));
+    }
+
+    positions
+}
+
 #[test]
 fn extracts_position_from_pest_message() {
     let position = parse_line_and_character("error @ Pos((3, 7))").expect("should extract position");
@@ -44,10 +62,27 @@ fn cached_document_state_returns_diagnostics_without_reparsing() {
 }
 
 #[test]
-fn cached_document_state_builds_semantic_tokens_from_stored_text() {
-    let state = DocumentState::from_text("fn label".to_string());
+fn semantic_tokens_use_instruction_name_source_range() {
+    let state = DocumentState::from_text(".text\naddi x1, x2, 123".to_string());
+    let tokens = state.semantic_tokens();
+    let positions = decode_token_positions(&tokens);
+
+    assert_eq!(positions, vec![(1, 0, 4)]);
+}
+
+#[test]
+fn semantic_tokens_highlight_only_mnemonic_after_label() {
+    let state = DocumentState::from_text(".text\nloop: c.addi x1, 1".to_string());
+    let tokens = state.semantic_tokens();
+    let positions = decode_token_positions(&tokens);
+
+    assert_eq!(positions, vec![(1, 6, 6)]);
+}
+
+#[test]
+fn invalid_input_does_not_break_semantic_tokens() {
+    let state = DocumentState::from_text("bad <<".to_string());
     let tokens = state.semantic_tokens();
 
-    assert_eq!(tokens.len(), 1);
-    assert_eq!(tokens[0].length, 2);
+    assert!(tokens.is_empty());
 }
