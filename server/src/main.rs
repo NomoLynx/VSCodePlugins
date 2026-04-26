@@ -25,10 +25,12 @@ const TOKEN_TYPE_INSTRUCTION: u32 = 0;
 const TOKEN_TYPE_REGISTER_ORDINARY: u32 = 1;
 const TOKEN_TYPE_REGISTER_FLOAT: u32 = 2;
 const TOKEN_TYPE_REGISTER_VECTOR: u32 = 3;
+const TOKEN_TYPE_IMMEDIATE: u32 = 4;
 const TOKEN_LEGEND_INSTRUCTION: &str = "instruction";
 const TOKEN_LEGEND_REGISTER_ORDINARY: &str = "registerOrdinary";
 const TOKEN_LEGEND_REGISTER_FLOAT: &str = "registerFloat";
 const TOKEN_LEGEND_REGISTER_VECTOR: &str = "registerVector";
+const TOKEN_LEGEND_IMMEDIATE: &str = "immediate";
 
 static TOKEN_TEXT_DEBUG_MESSAGES: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 
@@ -160,6 +162,10 @@ fn collect_semantic_tokens(text: &str, program: &AsmProgram) -> Vec<SemanticToke
                 .map(|register_name| classify_register_token(&register_name))
                 .unwrap_or(TOKEN_TYPE_REGISTER_ORDINARY);
             ranges.push((register_range, token_type));
+        }
+
+        if let Some(range) = instruction.get_imm_location().copied() {
+            ranges.push((range, TOKEN_TYPE_IMMEDIATE));
         }
     }
 
@@ -375,6 +381,7 @@ impl LanguageServer for Backend {
                 SemanticTokenType::new(TOKEN_LEGEND_REGISTER_ORDINARY),
                 SemanticTokenType::new(TOKEN_LEGEND_REGISTER_FLOAT),
                 SemanticTokenType::new(TOKEN_LEGEND_REGISTER_VECTOR),
+                SemanticTokenType::new(TOKEN_LEGEND_IMMEDIATE),
             ],
             token_modifiers: vec![],
         };

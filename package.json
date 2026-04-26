@@ -52,6 +52,11 @@
         "id": "registerVector",
         "superType": "variable",
         "description": "RISC-V vector register"
+      },
+      {
+        "id": "immediate",
+        "superType": "number",
+        "description": "RISC-V immediate value"
       }
     ],
     "semanticTokenScopes": [
@@ -72,6 +77,9 @@
           "registerVector": [
             "variable.language.register.vector.assembly",
             "variable.language.register.assembly"
+          ],
+          "immediate": [
+            "constant.numeric.assembly"
           ]
         }
       }
@@ -91,6 +99,9 @@
           },
           "registerVector:riscvasm": {
             "foreground": "#4B9CFF"
+          },
+          "immediate:riscvasm": {
+            "foreground": "#9B59B6"
           }
         }
       }
