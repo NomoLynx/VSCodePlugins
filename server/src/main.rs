@@ -15,6 +15,7 @@ use riscv_asm_lib::r5asm::{
     asm_error::{AsmError, AsmErrorSourceFileLocation},
     asm_program::AsmProgram,
     instruction::SourceRange,
+    register::Register,
 };
 
 // const string for LSP name 
@@ -234,64 +235,13 @@ fn token_text_from_range(text: &str, range: &SourceRange) -> Option<String> {
 }
 
 fn classify_register_token(register_name: &str) -> u32 {
-    let normalized = register_name.trim().to_ascii_uppercase();
-
-    let ty = if is_float_register_name(&normalized) {
+    if Register::is_float_register_name(register_name) {
         TOKEN_TYPE_REGISTER_FLOAT
-    } else if is_vector_register_name(&normalized) {
+    } else if Register::is_vector_register_name(register_name) {
         TOKEN_TYPE_REGISTER_VECTOR
     } else {
         TOKEN_TYPE_REGISTER_ORDINARY
-    };
-
-    ty
-}
-
-fn has_numeric_suffix(name: &str, prefix_len: usize) -> bool {
-    name.len() > prefix_len && name[prefix_len..].chars().all(|ch| ch.is_ascii_digit())
-}
-
-fn is_float_register_name(name: &str) -> bool {
-    has_numeric_suffix(name, 1) && name.starts_with('F')
-        || matches!(
-            name,
-            "FT0"
-                | "FT1"
-                | "FT2"
-                | "FT3"
-                | "FT4"
-                | "FT5"
-                | "FT6"
-                | "FT7"
-                | "FT8"
-                | "FT9"
-                | "FT10"
-                | "FT11"
-                | "FS0"
-                | "FS1"
-                | "FS2"
-                | "FS3"
-                | "FS4"
-                | "FS5"
-                | "FS6"
-                | "FS7"
-                | "FS8"
-                | "FS9"
-                | "FS10"
-                | "FS11"
-                | "FA0"
-                | "FA1"
-                | "FA2"
-                | "FA3"
-                | "FA4"
-                | "FA5"
-                | "FA6"
-                | "FA7"
-        )
-}
-
-fn is_vector_register_name(name: &str) -> bool {
-    has_numeric_suffix(name, 1) && name.starts_with('V')
+    }
 }
 
 fn semantic_token_from_range(
