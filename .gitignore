@@ -24,3 +24,4 @@ bin/
 
 #exclude logs folder anywhere in the path
 logs/
+server/*.log

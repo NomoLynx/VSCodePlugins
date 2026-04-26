@@ -39,9 +39,19 @@
         "description": "RISC-V instruction mnemonic"
       },
       {
-        "id": "register",
+        "id": "registerOrdinary",
         "superType": "variable",
-        "description": "RISC-V register name"
+        "description": "RISC-V ordinary integer register"
+      },
+      {
+        "id": "registerFloat",
+        "superType": "variable",
+        "description": "RISC-V floating-point register"
+      },
+      {
+        "id": "registerVector",
+        "superType": "variable",
+        "description": "RISC-V vector register"
       }
     ],
     "semanticTokenScopes": [
@@ -51,12 +61,40 @@
           "instruction": [
             "keyword.control.assembly"
           ],
-          "register": [
+          "registerOrdinary": [
+            "variable.language.register.integer.assembly",
+            "variable.language.register.assembly"
+          ],
+          "registerFloat": [
+            "variable.language.register.float.assembly",
+            "variable.language.register.assembly"
+          ],
+          "registerVector": [
+            "variable.language.register.vector.assembly",
             "variable.language.register.assembly"
           ]
         }
       }
-    ]
+    ],
+    "configurationDefaults": {
+      "[riscvasm]": {
+        "editor.semanticHighlighting.enabled": true
+      },
+      "editor.semanticTokenColorCustomizations": {
+        "enabled": true,
+        "rules": {
+          "registerFloat:riscvasm": {
+            "foreground": "#0d4acd"
+          },
+          "registerOrdinary:riscvasm": {
+            "foreground": "#2D6CDF"
+          },
+          "registerVector:riscvasm": {
+            "foreground": "#4B9CFF"
+          }
+        }
+      }
+    }
   },
   "scripts": {
     "compile": "tsc -p ./",

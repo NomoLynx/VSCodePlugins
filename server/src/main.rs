@@ -2,7 +2,7 @@ pub(crate) mod asm_parser;
 pub(crate) mod lsp_location;
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use tokio::sync::RwLock;
 use tower_lsp::jsonrpc::Result;
@@ -21,9 +21,15 @@ use riscv_asm_lib::r5asm::{
 const LSP_NAME: &str = "Rust RiscV LSP";
 
 const TOKEN_TYPE_INSTRUCTION: u32 = 0;
-const TOKEN_TYPE_REGISTER: u32 = 1;
+const TOKEN_TYPE_REGISTER_ORDINARY: u32 = 1;
+const TOKEN_TYPE_REGISTER_FLOAT: u32 = 2;
+const TOKEN_TYPE_REGISTER_VECTOR: u32 = 3;
 const TOKEN_LEGEND_INSTRUCTION: &str = "instruction";
-const TOKEN_LEGEND_REGISTER: &str = "register";
+const TOKEN_LEGEND_REGISTER_ORDINARY: &str = "registerOrdinary";
+const TOKEN_LEGEND_REGISTER_FLOAT: &str = "registerFloat";
+const TOKEN_LEGEND_REGISTER_VECTOR: &str = "registerVector";
+
+static TOKEN_TEXT_DEBUG_MESSAGES: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 
 #[derive(Debug)]
 enum ParseState {
@@ -65,7 +71,7 @@ impl DocumentState {
 
     fn semantic_tokens(&self) -> Vec<SemanticToken> {
         match &self.parse_state {
-            ParseState::Parsed(program) => collect_semantic_tokens(program),
+            ParseState::Parsed(program) => collect_semantic_tokens(&self.text, program),
             ParseState::Error(_) | ParseState::Panic(_) => Vec::new(),
         }
     }
@@ -110,7 +116,25 @@ fn collect_parse_diagnostics(text: &str) -> Vec<Diagnostic> {
     DocumentState::from_text(text.to_string()).diagnostics()
 }
 
-fn collect_semantic_tokens(program: &AsmProgram) -> Vec<SemanticToken> {
+fn token_text_debug_messages() -> &'static Mutex<Vec<String>> {
+    TOKEN_TEXT_DEBUG_MESSAGES.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn push_token_text_debug_message(message: String) {
+    if let Ok(mut messages) = token_text_debug_messages().lock() {
+        messages.push(message);
+    }
+}
+
+fn take_token_text_debug_messages() -> Vec<String> {
+    if let Ok(mut messages) = token_text_debug_messages().lock() {
+        std::mem::take(&mut *messages)
+    } else {
+        Vec::new()
+    }
+}
+
+fn collect_semantic_tokens(text: &str, program: &AsmProgram) -> Vec<SemanticToken> {
     let mut ranges = Vec::new();
 
     for item in program.get_text_section_items() {
@@ -131,7 +155,10 @@ fn collect_semantic_tokens(program: &AsmProgram) -> Vec<SemanticToken> {
         .into_iter()
         .flatten()
         {
-            ranges.push((register_range, TOKEN_TYPE_REGISTER));
+            let token_type = token_text_from_range(text, &register_range)
+                .map(|register_name| classify_register_token(&register_name))
+                .unwrap_or(TOKEN_TYPE_REGISTER_ORDINARY);
+            ranges.push((register_range, token_type));
         }
     }
 
@@ -154,6 +181,117 @@ fn collect_semantic_tokens(program: &AsmProgram) -> Vec<SemanticToken> {
     }
 
     data
+}
+
+fn token_text_from_range(text: &str, range: &SourceRange) -> Option<String> {
+    if range.start.line == 0 || range.start.column == 0 {
+        push_token_text_debug_message(format!(
+            "token_text_from_range skipped invalid start position: {:?}",
+            range
+        ));
+        return None;
+    }
+
+    let Some(line) = text.lines().nth(range.start.line.saturating_sub(1)) else {
+        push_token_text_debug_message(format!(
+            "token_text_from_range could not find line {} for range {:?}",
+            range.start.line,
+            range
+        ));
+        return None;
+    };
+    let start_column = range.start.column.saturating_sub(1);
+    let length = range.end.column.saturating_sub(range.start.column);
+
+    if length == 0 {
+        push_token_text_debug_message(format!(
+            "token_text_from_range skipped zero-length range: {:?}",
+            range
+        ));
+        return None;
+    }
+
+    let token_text: String = line
+        .chars()
+        .skip(start_column)
+        .take(length)
+        .collect();
+
+    if token_text.is_empty() {
+        push_token_text_debug_message(format!(
+            "token_text_from_range produced empty text for range {:?}",
+            range
+        ));
+        None
+    } else {
+        push_token_text_debug_message(format!(
+            "token_text_from_range {:?} -> '{}'",
+            range,
+            token_text
+        ));
+        Some(token_text)
+    }
+}
+
+fn classify_register_token(register_name: &str) -> u32 {
+    let normalized = register_name.trim().to_ascii_uppercase();
+
+    let ty = if is_float_register_name(&normalized) {
+        TOKEN_TYPE_REGISTER_FLOAT
+    } else if is_vector_register_name(&normalized) {
+        TOKEN_TYPE_REGISTER_VECTOR
+    } else {
+        TOKEN_TYPE_REGISTER_ORDINARY
+    };
+
+    ty
+}
+
+fn has_numeric_suffix(name: &str, prefix_len: usize) -> bool {
+    name.len() > prefix_len && name[prefix_len..].chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn is_float_register_name(name: &str) -> bool {
+    has_numeric_suffix(name, 1) && name.starts_with('F')
+        || matches!(
+            name,
+            "FT0"
+                | "FT1"
+                | "FT2"
+                | "FT3"
+                | "FT4"
+                | "FT5"
+                | "FT6"
+                | "FT7"
+                | "FT8"
+                | "FT9"
+                | "FT10"
+                | "FT11"
+                | "FS0"
+                | "FS1"
+                | "FS2"
+                | "FS3"
+                | "FS4"
+                | "FS5"
+                | "FS6"
+                | "FS7"
+                | "FS8"
+                | "FS9"
+                | "FS10"
+                | "FS11"
+                | "FA0"
+                | "FA1"
+                | "FA2"
+                | "FA3"
+                | "FA4"
+                | "FA5"
+                | "FA6"
+                | "FA7"
+        )
+}
+
+fn is_vector_register_name(name: &str) -> bool {
+    has_numeric_suffix(name, 1) && name.starts_with('V')
 }
 
 fn semantic_token_from_range(
@@ -284,7 +422,9 @@ impl LanguageServer for Backend {
         let legend = SemanticTokensLegend {
             token_types: vec![
                 SemanticTokenType::new(TOKEN_LEGEND_INSTRUCTION),
-                SemanticTokenType::new(TOKEN_LEGEND_REGISTER),
+                SemanticTokenType::new(TOKEN_LEGEND_REGISTER_ORDINARY),
+                SemanticTokenType::new(TOKEN_LEGEND_REGISTER_FLOAT),
+                SemanticTokenType::new(TOKEN_LEGEND_REGISTER_VECTOR),
             ],
             token_modifiers: vec![],
         };
@@ -364,6 +504,10 @@ impl LanguageServer for Backend {
 
             state.semantic_tokens()
         };
+
+        for message in take_token_text_debug_messages() {
+            self.client.log_message(MessageType::INFO, message).await;
+        }
 
         Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
             result_id: None,

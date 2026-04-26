@@ -80,6 +80,24 @@ fn semantic_tokens_highlight_label_line_with_distinct_register_type() {
 }
 
 #[test]
+fn classifies_ordinary_register_tokens() {
+    assert_eq!(classify_register_token("x1"), TOKEN_TYPE_REGISTER_ORDINARY);
+    assert_eq!(classify_register_token("a7"), TOKEN_TYPE_REGISTER_ORDINARY);
+}
+
+#[test]
+fn classifies_float_register_tokens() {
+    assert_eq!(classify_register_token("f2"), TOKEN_TYPE_REGISTER_FLOAT);
+    assert_eq!(classify_register_token("fa0"), TOKEN_TYPE_REGISTER_FLOAT);
+}
+
+#[test]
+fn classifies_vector_register_tokens() {
+    assert_eq!(classify_register_token("v0"), TOKEN_TYPE_REGISTER_VECTOR);
+    assert_eq!(classify_register_token("v31"), TOKEN_TYPE_REGISTER_VECTOR);
+}
+
+#[test]
 fn invalid_input_does_not_break_semantic_tokens() {
     let state = DocumentState::from_text("bad <<".to_string());
     let tokens = state.semantic_tokens();
