@@ -39,6 +39,11 @@
         "description": "RISC-V instruction mnemonic"
       },
       {
+        "id": "instructionCallRet",
+        "superType": "instruction",
+        "description": "RISC-V call/ret instruction mnemonic"
+      },
+      {
         "id": "registerOrdinary",
         "superType": "variable",
         "description": "RISC-V ordinary integer register"
@@ -66,6 +71,10 @@
           "instruction": [
             "keyword.control.assembly"
           ],
+          "instructionCallRet": [
+            "keyword.control.call-return.assembly",
+            "keyword.control.flow.assembly"
+          ],
           "registerOrdinary": [
             "variable.language.register.integer.assembly",
             "variable.language.register.assembly"
@@ -91,6 +100,9 @@
       "editor.semanticTokenColorCustomizations": {
         "enabled": true,
         "rules": {
+          "instructionCallRet:riscvasm": {
+            "foreground": "#FF4FA3"
+          },
           "registerFloat:riscvasm": {
             "foreground": "#0d4acd"
           },

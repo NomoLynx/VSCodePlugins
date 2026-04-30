@@ -22,11 +22,13 @@ use riscv_asm_lib::r5asm::{
 const LSP_NAME: &str = "Rust RiscV LSP";
 
 const TOKEN_TYPE_INSTRUCTION: u32 = 0;
-const TOKEN_TYPE_REGISTER_ORDINARY: u32 = 1;
-const TOKEN_TYPE_REGISTER_FLOAT: u32 = 2;
-const TOKEN_TYPE_REGISTER_VECTOR: u32 = 3;
-const TOKEN_TYPE_IMMEDIATE: u32 = 4;
+const TOKEN_TYPE_INSTRUCTION_CALLRET: u32 = 1;
+const TOKEN_TYPE_REGISTER_ORDINARY: u32 = 2;
+const TOKEN_TYPE_REGISTER_FLOAT: u32 = 3;
+const TOKEN_TYPE_REGISTER_VECTOR: u32 = 4;
+const TOKEN_TYPE_IMMEDIATE: u32 = 5;
 const TOKEN_LEGEND_INSTRUCTION: &str = "instruction";
+const TOKEN_LEGEND_INSTRUCTION_CALLRET: &str = "instructionCallRet";
 const TOKEN_LEGEND_REGISTER_ORDINARY: &str = "registerOrdinary";
 const TOKEN_LEGEND_REGISTER_FLOAT: &str = "registerFloat";
 const TOKEN_LEGEND_REGISTER_VECTOR: &str = "registerVector";
@@ -146,7 +148,10 @@ fn collect_semantic_tokens(text: &str, program: &AsmProgram) -> Vec<SemanticToke
         };
 
         if let Some(range) = instruction.get_name_location().copied() {
-            ranges.push((range, TOKEN_TYPE_INSTRUCTION));
+            let token_type = token_text_from_range(text, &range)
+                .map(|name| classify_instruction_token(&name))
+                .unwrap_or(TOKEN_TYPE_INSTRUCTION);
+            ranges.push((range, token_type));
         }
 
         for register_range in [
@@ -247,6 +252,13 @@ fn classify_register_token(register_name: &str) -> u32 {
         TOKEN_TYPE_REGISTER_VECTOR
     } else {
         TOKEN_TYPE_REGISTER_ORDINARY
+    }
+}
+
+fn classify_instruction_token(instruction_name: &str) -> u32 {
+    match instruction_name.to_ascii_lowercase().as_str() {
+        "call" | "ret" => TOKEN_TYPE_INSTRUCTION_CALLRET,
+        _ => TOKEN_TYPE_INSTRUCTION,
     }
 }
 
@@ -378,6 +390,7 @@ impl LanguageServer for Backend {
         let legend = SemanticTokensLegend {
             token_types: vec![
                 SemanticTokenType::new(TOKEN_LEGEND_INSTRUCTION),
+                SemanticTokenType::new(TOKEN_LEGEND_INSTRUCTION_CALLRET),
                 SemanticTokenType::new(TOKEN_LEGEND_REGISTER_ORDINARY),
                 SemanticTokenType::new(TOKEN_LEGEND_REGISTER_FLOAT),
                 SemanticTokenType::new(TOKEN_LEGEND_REGISTER_VECTOR),
