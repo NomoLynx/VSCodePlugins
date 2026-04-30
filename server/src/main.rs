@@ -82,6 +82,40 @@ impl DocumentState {
             ParseState::Error(_) | ParseState::Panic(_) => Vec::new(),
         }
     }
+
+    fn folding_ranges(&self) -> Vec<FoldingRange> {
+        let ParseState::Parsed(program) = &self.parse_state else {
+            return Vec::new();
+        };
+
+        let sections = program.get_sections();
+        let line_count = self.text.lines().count();
+        let mut ranges = Vec::new();
+
+        for (i, section) in sections.iter().enumerate() {
+            let Some(tag_range) = section.get_section_tag_range() else {
+                continue;
+            };
+
+            let start_line = tag_range.start.line.saturating_sub(1) as u32;
+            let end_line = sections
+                .get(i + 1)
+                .and_then(|next| next.get_section_tag_range())
+                .map(|next_tag| next_tag.start.line.saturating_sub(2) as u32)
+                .unwrap_or(line_count.saturating_sub(1) as u32);
+
+            if end_line > start_line {
+                ranges.push(FoldingRange {
+                    start_line,
+                    end_line,
+                    kind: Some(FoldingRangeKind::Region),
+                    ..FoldingRange::default()
+                });
+            }
+        }
+
+        ranges
+    }
 }
 
 #[derive(Debug)]
@@ -427,6 +461,7 @@ impl LanguageServer for Backend {
                         },
                     ),
                 ),
+                folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 ..ServerCapabilities::default()
             },
         })
@@ -492,6 +527,18 @@ impl LanguageServer for Backend {
             result_id: None,
             data,
         })))
+    }
+
+    async fn folding_range(
+        &self,
+        params: FoldingRangeParams,
+    ) -> Result<Option<Vec<FoldingRange>>> {
+        let documents = self.documents.read().await;
+        let Some(state) = documents.get(&params.text_document.uri) else {
+            return Ok(None);
+        };
+
+        Ok(Some(state.folding_ranges()))
     }
 }
 
