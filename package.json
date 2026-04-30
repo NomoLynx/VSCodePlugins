@@ -62,6 +62,11 @@
         "id": "immediate",
         "superType": "number",
         "description": "RISC-V immediate value"
+      },
+      {
+        "id": "sectionTag",
+        "superType": "namespace",
+        "description": "RISC-V section tag (.text, .data, etc.)"
       }
     ],
     "semanticTokenScopes": [
@@ -89,6 +94,10 @@
           ],
           "immediate": [
             "constant.numeric.assembly"
+          ],
+          "sectionTag": [
+            "entity.name.section.assembly",
+            "keyword.other.section.assembly"
           ]
         }
       }
@@ -114,6 +123,9 @@
           },
           "immediate:riscvasm": {
             "foreground": "#9B59B6"
+          },
+          "sectionTag:riscvasm": {
+            "foreground": "#8B0000"
           }
         }
       }

@@ -67,7 +67,7 @@ fn semantic_tokens_use_instruction_and_register_source_ranges() {
     let tokens = state.semantic_tokens();
     let positions = decode_token_positions(&tokens);
 
-    assert_eq!(positions, vec![(1, 0, 4, 0), (1, 5, 2, 1), (1, 9, 2, 1)]);
+    assert_eq!(positions, vec![(0, 0, 5, 6), (1, 0, 4, 0), (1, 5, 2, 2), (1, 9, 2, 2), (1, 13, 3, 5)]);
 }
 
 #[test]
@@ -76,7 +76,7 @@ fn semantic_tokens_highlight_label_line_with_distinct_register_type() {
     let tokens = state.semantic_tokens();
     let positions = decode_token_positions(&tokens);
 
-    assert_eq!(positions, vec![(1, 6, 6, 0), (1, 13, 2, 1)]);
+    assert_eq!(positions, vec![(0, 0, 5, 6), (1, 6, 6, 0), (1, 13, 2, 2), (1, 17, 1, 5)]);
 }
 
 #[test]
