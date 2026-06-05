@@ -1,3 +1,5 @@
+use crate::machine::machine::ProgramId;
+
 #[derive(Clone, Debug)]
 pub struct RegValue<T> {
     pub value: T,
@@ -126,6 +128,7 @@ impl Default for CsrFile {
 pub struct Hart {
     pub id: u64,
     pub pc: usize,
+    pub program_id: ProgramId,
     pub x: IntegerRegisterFile,
     pub f: FloatRegisterFile,
     pub v: VectorRegisterFile,
@@ -138,6 +141,7 @@ impl Default for Hart {
         Self {
             id: 0,
             pc: 0,
+            program_id: 0,
             x: IntegerRegisterFile::default(),
             f: FloatRegisterFile::default(),
             v: VectorRegisterFile::default(),
