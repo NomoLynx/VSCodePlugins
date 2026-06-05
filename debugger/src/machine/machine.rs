@@ -1,6 +1,7 @@
 use riscv_asm_lib::r5asm::asm_program::AsmProgram;
 use riscv_asm_lib::r5asm::instruction::Instruction;
 
+use crate::debugger_error::DebuggerError;
 use crate::machine::hart::Hart;
 use crate::machine::processor::Processor;
 use crate::memory::memory::Memory;
@@ -96,12 +97,11 @@ impl Machine {
 
     }
 
-    fn execute_inst(
-        &mut self,
-        hart_id: u64,
-        inst: &Instruction,
-    ) {
+    fn execute_inst(&mut self, hart_id: HartId, inst: &Instruction) -> Result<(), DebuggerError> {
         let hart = self.get_hart_mut(hart_id as u64).unwrap();
-        
+        let opcode = inst.get_op_code()
+                    .map_err(|x| DebuggerError::GeneralError(x.get_error_message()))?;
+
+        Ok(())
     }
 }

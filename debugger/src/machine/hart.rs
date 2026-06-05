@@ -136,6 +136,25 @@ pub struct Hart {
     pub csr: CsrFile,
 }
 
+impl Hart {
+    pub fn new(id: u64, program_id: ProgramId) -> Self {
+        Self {
+            id,
+            pc: 0,
+            program_id,
+            x: IntegerRegisterFile::default(),
+            f: FloatRegisterFile::default(),
+            v: VectorRegisterFile::default(),
+            vector_state: VectorState::default(),
+            csr: CsrFile::default(),
+        }
+    }
+
+    pub fn next_pc(&mut self) {
+        self.pc += 1;
+    }
+}
+
 impl Default for Hart {
     fn default() -> Self {
         Self {

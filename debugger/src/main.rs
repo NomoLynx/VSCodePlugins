@@ -4,6 +4,7 @@ mod program;
 mod vm;
 mod trace;
 mod debug;
+mod debugger_error;
 
 use crate::machine::hart::{
     Hart,
