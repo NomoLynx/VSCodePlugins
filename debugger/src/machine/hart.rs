@@ -9,9 +9,57 @@ pub struct IntegerRegisterFile {
     pub regs: Vec<RegValue<u64>>,
 }
 
+impl IntegerRegisterFile {
+    pub fn read(&self, reg: usize) -> u64 {
+        self.regs[reg].value
+    }
+
+    pub fn write(&mut self, reg: usize, value: u64) {
+        if reg == 0 {
+            return; // x0 is hardwired to 0
+        }
+
+        self.regs[reg].value = value;
+    }
+
+    pub fn new(size:usize) -> Self {
+        Self {
+            regs: vec![RegValue { value: 0, provenance: None }; size],
+        }
+    }
+}
+
+impl Default for IntegerRegisterFile {
+    fn default() -> Self {
+        Self::new(32)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct FloatRegisterFile {
     pub regs: Vec<RegValue<f64>>,
+}
+
+impl FloatRegisterFile {
+    pub fn read(&self, reg: usize) -> f64 {
+        self.regs[reg].value
+    }
+
+    pub fn write(&mut self, reg: usize, value: f64) {
+        self.regs[reg].value = value;
+    }
+
+    pub fn new(size:usize) -> Self {
+        Self {
+            regs: vec![RegValue { value: 0.0, provenance: None }; size],
+        }
+    }
+}
+
+impl Default for FloatRegisterFile {
+    fn default() -> Self {
+        Self::new(32)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -19,9 +67,25 @@ pub struct VectorRegister {
     pub bytes: Vec<u8>,
 }
 
+impl Default for VectorRegister {
+    fn default() -> Self {
+        Self {
+            bytes: vec![0; 64], // 512 bits = 64 bytes
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct VectorRegisterFile {
     pub regs: Vec<VectorRegister>,
+}
+
+impl Default for VectorRegisterFile {
+    fn default() -> Self {
+        Self {
+            regs: vec![VectorRegister::default(); 32],
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -31,11 +95,31 @@ pub struct VectorState {
     pub lmul: usize,
 }
 
+impl Default for VectorState {
+    fn default() -> Self {
+        Self {
+            vl: 0,
+            sew: 0,
+            lmul: 0,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct CsrFile {
     pub mhartid: u64,
     pub vl: u64,
     pub vtype: u64,
+}
+
+impl Default for CsrFile {
+    fn default() -> Self {
+        Self {
+            mhartid: 0,
+            vl: 0,
+            vtype: 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -47,4 +131,18 @@ pub struct Hart {
     pub v: VectorRegisterFile,
     pub vector_state: VectorState,
     pub csr: CsrFile,
+}
+
+impl Default for Hart {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            pc: 0,
+            x: IntegerRegisterFile::default(),
+            f: FloatRegisterFile::default(),
+            v: VectorRegisterFile::default(),
+            vector_state: VectorState::default(),
+            csr: CsrFile::default(),
+        }
+    }
 }

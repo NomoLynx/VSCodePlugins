@@ -5,6 +5,22 @@ mod vm;
 mod trace;
 mod debug;
 
+use crate::machine::hart::{
+    Hart,
+    IntegerRegisterFile,
+    FloatRegisterFile,
+    VectorRegisterFile,
+    VectorState,
+    CsrFile,
+    RegValue,
+};
+
 fn main() {
-    println!("RISC-V simulator architecture skeleton");
+    let mut hart = Hart::default();
+
+    // t1 = 10
+    hart.x.write(6, 10);
+
+    // t2 = 20
+    hart.x.write(7, 20);
 }

@@ -4,6 +4,7 @@
 name = "rust_keyword_lsp_server"
 version = "0.1.0"
 edition = "2021"
+authors = ["Tao Liu <ttliu2000@hotmail.com>"]
 
 [dependencies]
 tokio = { version = "*", features = ["full"] }
