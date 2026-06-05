@@ -1,3 +1,10 @@
+mod machine;
+mod memory;
+mod program;
+mod vm;
+mod trace;
+mod debug;
+
 fn main() {
-    println!("Hello, world!");
+    println!("RISC-V simulator architecture skeleton");
 }
