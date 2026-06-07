@@ -87,6 +87,14 @@ impl Machine {
         None
     }
 
+    pub fn get_default_hart(&self) -> Option<&Hart> {
+        self.get_hart(0)
+    }
+
+    pub fn get_default_hart_mut(&mut self) -> Option<&mut Hart> {
+        self.get_hart_mut(0)
+    }
+
     fn fetch_inst(
         &self,
         hart: &Hart,
