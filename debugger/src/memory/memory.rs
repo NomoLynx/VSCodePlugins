@@ -275,7 +275,7 @@ impl Memory {
             );
     }
 
-    fn find_region(
+    pub fn find_region(
         &self,
         addr: u64,
         size: usize,
@@ -293,7 +293,7 @@ impl Memory {
             })
     }
 
-    fn find_region_mut(
+    pub fn find_region_mut(
         &mut self,
         addr: u64,
         size: usize,

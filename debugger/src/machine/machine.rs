@@ -186,7 +186,6 @@ impl Machine {
         match opcode {
             OpCode::Add => {
                 let lhs = self.get_x(hart_id, inst.get_r1());
-
                 let rhs = self.get_x(hart_id, inst.get_r2());
 
                 self.set_x(
@@ -195,13 +194,20 @@ impl Machine {
                     lhs.wrapping_add(rhs),
                 );
 
-                self.get_hart_mut(hart_id).unwrap().next_pc();
+                self.next_pc(hart_id)?;
             }
             _ => {
                 return Err(DebuggerError::GeneralError(format!("unsupported instruction: {:?}", opcode)));
             }
         }
 
+        Ok(())
+    }
+
+    fn next_pc(&mut self, hart_id: HartId) -> Result<(), DebuggerError> {
+        let err_msg = format!("invalid hart: {}", hart_id);
+        let hart = self.get_hart_mut(hart_id).ok_or_else(|| DebuggerError::GeneralError(err_msg))?;
+        hart.next_pc();
         Ok(())
     }
 
