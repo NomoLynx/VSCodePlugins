@@ -20,8 +20,8 @@ fn main() {
     let t0 = machine.lookup_register("t0").unwrap();
 
     let hart = machine.get_default_hart_mut().unwrap();
-    hart.write_register(&t1, machine::runtime_value::RuntimeValue::Integer(10));
-    hart.write_register(&t2, machine::runtime_value::RuntimeValue::Integer(20));
+    hart.write_register(&t1, 10.into());
+    hart.write_register(&t2, 20.into());
     
 
     let r = machine.step_hart(0);
