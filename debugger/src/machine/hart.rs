@@ -1,4 +1,4 @@
-use crate::machine::{machine::ProgramId, register_ref::RegisterRef};
+use crate::machine::{machine::ProgramId, register_ref::{RegisterRef, RegisterType}, runtime_value::RuntimeValue};
 
 #[derive(Clone, Debug)]
 pub struct RegValue<T> {
@@ -152,6 +152,85 @@ impl Hart {
 
     pub fn next_pc(&mut self) {
         self.pc += 1;
+    }
+
+    pub fn read_register(
+        &self,
+        reg: &RegisterRef,
+    ) -> RuntimeValue {
+
+        match reg.reg_type {
+
+            RegisterType::Integer => {
+
+                RuntimeValue::Integer(
+                    self.x.regs[reg.index].value
+                )
+            }
+
+            RegisterType::Float => {
+
+                RuntimeValue::Float64(
+                    self.f.regs[reg.index].value
+                )
+            }
+
+            RegisterType::Vector => {
+
+                RuntimeValue::Vector(
+                    self.v.regs[reg.index]
+                        .bytes
+                        .clone()
+                )
+            }
+
+            RegisterType::Csr => {
+                todo!()
+            }
+        }
+    }
+
+    pub fn write_register(
+        &mut self,
+        reg: &RegisterRef,
+        value: RuntimeValue,
+    ) {
+
+        match (
+            reg.reg_type,
+            value,
+        ) {
+
+            (
+                RegisterType::Integer,
+                RuntimeValue::Integer(v),
+            ) => {
+
+                if reg.index != 0 {
+                    self.x.regs[reg.index].value = v;
+                }
+            }
+
+            (
+                RegisterType::Float,
+                RuntimeValue::Float64(v),
+            ) => {
+
+                self.f.regs[reg.index].value = v;
+            }
+
+            (
+                RegisterType::Vector,
+                RuntimeValue::Vector(v),
+            ) => {
+
+                self.v.regs[reg.index].bytes = v;
+            }
+
+            _ => {
+                panic!("register type mismatch");
+            }
+        }
     }
 }
 

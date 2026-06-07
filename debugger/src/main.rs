@@ -17,21 +17,17 @@ fn main() {
     machine.add_program(program);
     let t1 = machine.lookup_register("t1").unwrap();
     let t2 = machine.lookup_register("t2").unwrap();
-    let t1 = machine.registers.get_register_value(Some(&"t1".to_string())).unwrap();
-    let t2 = machine.registers.get_register_value(Some(&"t2".to_string())).unwrap();
+    let t0 = machine.lookup_register("t0").unwrap();
 
     let hart = machine.get_default_hart_mut().unwrap();
-    // t1 = 10
-    hart.x.write(t1 as usize, 10);
-
-    // t2 = 20
-    hart.x.write(t2 as usize, 20);
+    hart.write_register(&t1, machine::runtime_value::RuntimeValue::Integer(10));
+    hart.write_register(&t2, machine::runtime_value::RuntimeValue::Integer(20));
     
 
     let r = machine.step_hart(0);
-    let result = machine.get_default_hart().unwrap().x.read(5);
+    let result = machine.get_default_hart().unwrap().read_register(&t0);
     
     println!("Result: {:?}", r);
-    println!("t0: {}", result);
+    println!("t0: {:?}", result);
     
 }
