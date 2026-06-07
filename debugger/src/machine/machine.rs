@@ -25,13 +25,16 @@ pub struct Machine {
 impl Machine {
 
     pub fn new() -> Self {
-        Self {
+        let mut r = Self {
             processors: vec![],
             programs: vec![],
-            memory: Memory::new(),
+            memory: Memory::default(),
 
             registers: Register::new(),
-        }
+        };
+
+        r.add_processor(Processor::default());
+        r
     }
 
     pub fn add_program(
@@ -96,7 +99,7 @@ impl Machine {
         item
     }
 
-    pub fn step_hart(&mut self, hart_id: HartId,) {
+    pub fn step_hart(&mut self, hart_id: HartId) -> Result<(), DebuggerError> {
 
         let (program_id, pc) = {
 
@@ -117,9 +120,11 @@ impl Machine {
             self.execute_inst(
                 hart_id,
                 &inst,
-            );
+            )
         }
-
+        else {
+            Ok(())
+        }
     }
 
     fn xreg(
@@ -189,5 +194,11 @@ impl Machine {
         }
 
         Ok(())
+    }
+}
+
+impl Default for Machine {
+    fn default() -> Self {
+        Self::new()
     }
 }
