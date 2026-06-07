@@ -15,6 +15,8 @@ fn main() {
 
     let program = parse_asm_use_default_config(".text \r\n add t0, t1, t2").unwrap();
     machine.add_program(program);
+    let t1 = machine.lookup_register("t1").unwrap();
+    let t2 = machine.lookup_register("t2").unwrap();
     let t1 = machine.registers.get_register_value(Some(&"t1".to_string())).unwrap();
     let t2 = machine.registers.get_register_value(Some(&"t2".to_string())).unwrap();
 

@@ -6,6 +6,7 @@ use riscv_asm_lib::r5asm::register::Register;
 use crate::debugger_error::DebuggerError;
 use crate::machine::hart::Hart;
 use crate::machine::processor::Processor;
+use crate::machine::register_ref::{RegisterRef, RegisterType};
 use crate::memory::memory::Memory;
 
 pub type ProcessorId = usize;
@@ -202,6 +203,36 @@ impl Machine {
         }
 
         Ok(())
+    }
+
+    pub fn lookup_register(&self, name: &str) -> Option<RegisterRef> {
+        let index = self.registers.get_register_value(Some(&name.to_string()));
+        match index {
+            Ok(idx) => {
+                let mut r = RegisterRef {
+                    reg_type: RegisterType::Integer,
+                    index: idx as usize,
+                };
+
+                let reg_type = if Register::is_float_register_name(name) {
+                    RegisterType::Float
+                }
+                else if Register::is_vector_register_name(name) {
+                    RegisterType::Vector
+                }
+                else if Register::is_csr_register_name(name) {
+                    RegisterType::Csr
+                }
+                else {
+                    RegisterType::Integer
+                };
+
+                r.reg_type = reg_type;
+
+                Some(r)
+            }
+            Err(_) => None,
+        }
     }
 }
 

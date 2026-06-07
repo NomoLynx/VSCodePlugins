@@ -1,4 +1,4 @@
-use crate::machine::machine::ProgramId;
+use crate::machine::{machine::ProgramId, register_ref::RegisterRef};
 
 #[derive(Clone, Debug)]
 pub struct RegValue<T> {
