@@ -1,4 +1,5 @@
 use riscv_asm_lib::r5asm::asm_program::AsmProgram;
+use riscv_asm_lib::r5asm::imm::Imm::{self};
 use riscv_asm_lib::r5asm::instruction::Instruction;
 use riscv_asm_lib::r5asm::opcode::OpCode;
 use riscv_asm_lib::r5asm::register::Register;
@@ -50,21 +51,14 @@ impl Machine {
         id
     }
 
-    pub fn add_processor(
-        &mut self,
-        processor: Processor,
-    ) {
-
+    pub fn add_processor(&mut self, processor: Processor) {
         self.processors.push(processor);
     }
 
     pub fn get_hart(&self, hart_id: HartId) -> Option<&Hart> {
         for processor in &self.processors {
-
             for hart in &processor.harts {
-
                 if hart.id == hart_id {
-
                     return Some(hart);
                 }
             }
@@ -81,6 +75,18 @@ impl Machine {
                 if hart.id == hart_id {
 
                     return Some(hart);
+                }
+            }
+        }
+
+        None
+    }
+
+    pub fn get_processor_from_hart_id(&self, hart_id: HartId) -> Option<&Processor> {
+        for processor in &self.processors {
+            for hart in &processor.harts {
+                if hart.id == hart_id {
+                    return Some(processor);
                 }
             }
         }
@@ -320,12 +326,161 @@ impl Machine {
 
                 self.next_pc(hart_id)?;
             }
+            OpCode::Addi => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_u64_from_imm(hart_id, inst.get_imm()) as i64;
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    lhs.wrapping_add_signed(imm),
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Andi => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let imm =self.get_u64_from_imm(hart_id, inst.get_imm());
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    lhs & imm,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Ori => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let imm =self.get_u64_from_imm(hart_id, inst.get_imm());
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    lhs | imm,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Xori => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let imm =self.get_u64_from_imm(hart_id, inst.get_imm());
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    lhs ^ imm,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Slti => {
+
+                let lhs = self.get_x(hart_id, inst.get_r1()) as i64;
+                let imm =self.get_u64_from_imm(hart_id, inst.get_imm()) as i64;
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    if lhs < imm { 1 } else { 0 },
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Sltiu => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    if lhs < imm { 1 } else { 0 },
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Slli => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+
+                let shamt =
+                    (self.get_u64_from_imm(hart_id, inst.get_imm()) as u64 & 0x3f)
+                        as u32;
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    lhs << shamt,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Srli => {
+
+                let lhs = self.get_x(hart_id, inst.get_r1());
+
+                let shamt =
+                    (self.get_u64_from_imm(hart_id, inst.get_imm()) as u64 & 0x3f)
+                        as u32;
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    lhs >> shamt,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Srai => {
+
+                let lhs =
+                    self.get_x(
+                        hart_id,
+                        inst.get_r1(),
+                    ) as i64;
+
+                let shamt =
+                    (self.get_u64_from_imm(hart_id, inst.get_imm()) as u64 & 0x3f)
+                        as u32;
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    (lhs >> shamt) as u64,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Lui => {
+                let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    imm << 12,
+                );
+
+                self.next_pc(hart_id)?;
+            }
             _ => {
                 return Err(DebuggerError::GeneralError(format!("unsupported instruction: {:?}", opcode)));
             }
         }
 
         Ok(())
+    }
+
+    /// get u64 value from Imm, if Imm is None, return 0
+    fn get_u64_from_imm(&self, hart_id: HartId, imm: Option<&Imm>) -> u64 {
+        match imm {
+            Some(Imm::Value(s)) => core_utils::number::get_u64_from_str(s).unwrap_or(0),
+            Some(Imm::ImmMacro(n)) => {
+                match n {
+                    riscv_asm_lib::r5asm::imm_macro::ImmMacro::PtrSize => 
+                        self.get_processor_from_hart_id(hart_id).unwrap().addressing.to_ptr_size(),
+                }
+            }
+            None => 0,
+        }
     }
 
     fn next_pc(&mut self, hart_id: HartId) -> Result<(), DebuggerError> {
