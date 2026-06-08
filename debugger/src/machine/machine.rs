@@ -187,11 +187,135 @@ impl Machine {
             OpCode::Add => {
                 let lhs = self.get_x(hart_id, inst.get_r1());
                 let rhs = self.get_x(hart_id, inst.get_r2());
+                self.set_x(hart_id, inst.get_r0(),lhs.wrapping_add(rhs));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Sub => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
 
                 self.set_x(
                     hart_id,
                     inst.get_r0(),
-                    lhs.wrapping_add(rhs),
+                    lhs.wrapping_sub(rhs),
+                );
+
+                self.next_pc(hart_id)?;
+            }
+
+            OpCode::And => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    lhs & rhs,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+
+            OpCode::Or => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    lhs | rhs,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+
+            OpCode::Xor => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    lhs ^ rhs,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Sll => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+
+                let shamt = (rhs & 0x3f) as u32;
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    lhs << shamt,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Srl => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+
+                let shamt = (rhs & 0x3f) as u32;
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    lhs >> shamt,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Sra => {
+                let lhs = self.get_x(hart_id, inst.get_r1()) as i64;
+                let rhs = self.get_x(hart_id, inst.get_r2());
+
+                let shamt = (rhs & 0x3f) as u32;
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    (lhs >> shamt) as u64,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Slt => {
+                let lhs = self.get_x(hart_id, inst.get_r1()) as i64;
+                let rhs = self.get_x(hart_id, inst.get_r2()) as i64;
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    if lhs < rhs { 1 } else { 0 },
+                );
+
+                self.next_pc(hart_id)?;
+            }
+
+            OpCode::Sltu => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    if lhs < rhs { 1 } else { 0 },
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Mul => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    lhs.wrapping_mul(rhs),
                 );
 
                 self.next_pc(hart_id)?;
