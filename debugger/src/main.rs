@@ -1,6 +1,5 @@
 mod machine;
 mod memory;
-mod program;
 mod vm;
 mod trace;
 mod debug;
