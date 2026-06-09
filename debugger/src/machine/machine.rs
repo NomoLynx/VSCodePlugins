@@ -401,10 +401,7 @@ impl Machine {
             }
             OpCode::Slli => {
                 let lhs = self.get_x(hart_id, inst.get_r1());
-
-                let shamt =
-                    (self.get_u64_from_imm(hart_id, inst.get_imm()) as u64 & 0x3f)
-                        as u32;
+                let shamt = (self.get_u64_from_imm(hart_id, inst.get_imm()) as u64 & 0x3f)  as u32;
 
                 self.set_x(
                     hart_id,
@@ -415,12 +412,8 @@ impl Machine {
                 self.next_pc(hart_id)?;
             }
             OpCode::Srli => {
-
                 let lhs = self.get_x(hart_id, inst.get_r1());
-
-                let shamt =
-                    (self.get_u64_from_imm(hart_id, inst.get_imm()) as u64 & 0x3f)
-                        as u32;
+                let shamt = (self.get_u64_from_imm(hart_id, inst.get_imm()) as u64 & 0x3f)  as u32;
 
                 self.set_x(
                     hart_id,
@@ -431,16 +424,8 @@ impl Machine {
                 self.next_pc(hart_id)?;
             }
             OpCode::Srai => {
-
-                let lhs =
-                    self.get_x(
-                        hart_id,
-                        inst.get_r1(),
-                    ) as i64;
-
-                let shamt =
-                    (self.get_u64_from_imm(hart_id, inst.get_imm()) as u64 & 0x3f)
-                        as u32;
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let shamt = (self.get_u64_from_imm(hart_id, inst.get_imm()) as u64 & 0x3f)  as u32;
 
                 self.set_x(
                     hart_id,
@@ -461,6 +446,168 @@ impl Machine {
 
                 self.next_pc(hart_id)?;
             }
+            OpCode::Lb => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+
+                let addr = base.wrapping_add_signed(imm);
+                let value =  self.memory.read_i8(addr) as i64 as u64;
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    value,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Lbu => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+
+                let addr = base.wrapping_add_signed(imm);
+
+                let value = self.memory.read_u8(addr) as u64;
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    value,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Lh => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+
+                let addr = base.wrapping_add_signed(imm);
+                let value =  self.memory.read_i16(addr) as i64 as u64;
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    value,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Lhu => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+
+                let addr = base.wrapping_add_signed(imm);
+                let value = self.memory.read_u16(addr) as u64;
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    value,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Lw => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+
+                let addr = base.wrapping_add_signed(imm);
+                let value =  self.memory.read_i32(addr) as i64 as u64;
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    value,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Lwu => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+
+                let addr = base.wrapping_add_signed(imm);
+                let value = self.memory.read_u32(addr)  as u64;
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    value,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Ld => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+
+                let addr = base.wrapping_add_signed(imm);
+                let value = self.memory.read_u64(addr);
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    value,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Sb => {
+                let value = self.get_x(hart_id, inst.get_r0());
+                let base = self.get_x(hart_id, inst.get_r1());
+
+                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+                let addr = base.wrapping_add_signed(imm);
+
+                self.memory.write_u8(
+                    addr,
+                    value as u8,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Sh => {
+                let value = self.get_x(hart_id, inst.get_r0());
+                let base = self.get_x(hart_id, inst.get_r1());
+
+                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+                let addr = base.wrapping_add_signed(imm);
+
+                self.memory.write_u16(
+                    addr,
+                    value as u16,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Sw => {
+                let value = self.get_x(hart_id, inst.get_r0());
+                let base = self.get_x(hart_id, inst.get_r1());
+
+                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+                let addr = base.wrapping_add_signed(imm);
+
+                self.memory.write_u32(
+                    addr,
+                    value as u32,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Sd => {
+                let value = self.get_x(hart_id, inst.get_r0());
+                let base = self.get_x(hart_id, inst.get_r1());
+
+                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+                let addr = base.wrapping_add_signed(imm);
+
+                self.memory.write_u64(
+                    addr,
+                    value,
+                );
+
+                self.next_pc(hart_id)?;
+            }
             _ => {
                 return Err(DebuggerError::GeneralError(format!("unsupported instruction: {:?}", opcode)));
             }
@@ -477,6 +624,20 @@ impl Machine {
                 match n {
                     riscv_asm_lib::r5asm::imm_macro::ImmMacro::PtrSize => 
                         self.get_processor_from_hart_id(hart_id).unwrap().addressing.to_ptr_size(),
+                }
+            }
+            None => 0,
+        }
+    }
+
+    /// get i64 value from Imm, if Imm is None, return 0
+    fn get_i64_from_imm(&self, hart_id: HartId, imm: Option<&Imm>) -> i64 {
+        match imm {
+            Some(Imm::Value(s)) => core_utils::number::get_i64_from_str(s).unwrap_or(0),
+            Some(Imm::ImmMacro(n)) => {
+                match n {
+                    riscv_asm_lib::r5asm::imm_macro::ImmMacro::PtrSize => 
+                        self.get_processor_from_hart_id(hart_id).unwrap().addressing.to_ptr_size() as i64,
                 }
             }
             None => 0,
