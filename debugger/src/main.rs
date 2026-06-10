@@ -5,6 +5,7 @@ mod trace;
 mod debug;
 mod debugger_error;
 
+use core_utils::filesystem::read_file_to_string;
 use riscv_asm_lib::r5asm::assembler::*;
 
 use crate::machine::machine::Machine;
@@ -12,7 +13,8 @@ use crate::machine::machine::Machine;
 fn main() {
     let mut machine = Machine::default();
 
-    let program = parse_asm_use_default_config(".text \r\n add t0, t1, t2").unwrap();
+    let asm_prog_text = read_file_to_string("./code.asm");
+    let program = parse_asm_use_default_config(&asm_prog_text).unwrap();
     machine.add_program(program);
 
     let t1 = machine.lookup_register("t1").unwrap();

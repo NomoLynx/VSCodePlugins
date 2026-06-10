@@ -11,3 +11,6 @@ authors = ["Tao Liu <ttliu2000@hotmail.com>"]
 # asm lib
 riscv_asm_lib = { path = "../../riscv_asm_lib" }
 core_utils = { path = "../../core_utils" }
+
+[build-dependencies]
+copy_to_output = "*"

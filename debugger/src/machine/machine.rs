@@ -117,10 +117,8 @@ impl Machine {
     pub fn step_hart(&mut self, hart_id: HartId) -> Result<(), DebuggerError> {
 
         let (program_id, pc) = {
-
-            let hart =
-                self.get_hart_mut(hart_id)
-                    .expect("invalid hart");
+            let hart = self.get_hart_mut(hart_id)
+                                    .expect("invalid hart");
 
             (hart.program_id, hart.pc)
         };
@@ -132,10 +130,7 @@ impl Machine {
                 .and_then(|x| x.get_inc())
                 .cloned() {
 
-            self.execute_inst(
-                hart_id,
-                &inst,
-            )
+            self.execute_inst(hart_id, &inst)
         }
         else {
             Ok(())
