@@ -1,3 +1,5 @@
+use std::default;
+
 use riscv_asm_lib::r5asm::asm_program::AsmProgram;
 use riscv_asm_lib::r5asm::imm::Imm::{self};
 use riscv_asm_lib::r5asm::instruction::Instruction;
@@ -94,12 +96,32 @@ impl Machine {
         None
     }
 
+    pub fn get_default_hart_id(&self) -> HartId {
+        0
+    }
+
     pub fn get_default_hart(&self) -> Option<&Hart> {
-        self.get_hart(0)
+        self.get_hart(self.get_default_hart_id())
     }
 
     pub fn get_default_hart_mut(&mut self) -> Option<&mut Hart> {
-        self.get_hart_mut(0)
+        let default_hart_id = self.get_default_hart_id();
+        self.get_hart_mut(default_hart_id)
+    }
+
+    pub fn init_hart_to_entry_point(&mut self, hart_id: HartId) -> Result<(), DebuggerError> {
+        let err_msg = format!("invalid hart: {}", hart_id);
+        let program_id = {
+            let hart = self.get_hart_mut(hart_id)
+                                    .ok_or_else(|| DebuggerError::GeneralError(err_msg))?;
+            hart.program_id
+        };
+        let entry_point = self.programs[program_id]
+                                                    .get_entry_address2()
+                                                    .map_err(|x| DebuggerError::GeneralError(x.get_error_message()))?;
+        let hart = self.get_hart_mut(hart_id).unwrap();
+        hart.pc = entry_point;
+        Ok(())
     }
 
     /// fetch instruction for given hart, return None if no instruction found (e.g. pc is out of range)
@@ -146,14 +168,14 @@ impl Machine {
             self.programs[program_id]
                 .get_text_section_items()
                 .into_iter()
-                .find(|x| x.get_offset() == pc)
+                .find(|x| x.get_offset() == pc && x.is_inc())
                 .and_then(|x| x.get_inc())
                 .cloned() {
 
             self.execute_inst(hart_id, &inst)
         }
         else {
-            Ok(())
+            Err(DebuggerError::GeneralError(format!("no instruction found at pc: {}", pc)))
         }
     }
 

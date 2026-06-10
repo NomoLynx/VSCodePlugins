@@ -21,7 +21,10 @@ fn main() {
     let t2 = machine.lookup_register("t2").unwrap();
     let t0 = machine.lookup_register("t0").unwrap();
 
-    let hart = machine.get_default_hart_mut().unwrap();
+    let default_hart_id = machine.get_default_hart_id();
+    machine.init_hart_to_entry_point(default_hart_id).unwrap();
+
+    let hart = machine.get_default_hart_mut().unwrap();    
     hart.write_register(&t1, 10.into());
     hart.write_register(&t2, 20.into());
     
