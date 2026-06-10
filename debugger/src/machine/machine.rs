@@ -102,16 +102,31 @@ impl Machine {
         self.get_hart_mut(0)
     }
 
-    fn fetch_inst(
-        &self,
-        hart: &Hart,
-    ) -> Option<&Instruction> {
-
+    /// fetch instruction for given hart, return None if no instruction found (e.g. pc is out of range)
+    fn fetch_inst(&self, hart: &Hart) -> Option<&Instruction> {
         let program = &self.programs[hart.program_id];
         let text_items = program.get_text_section_items();
         let item = text_items.get(hart.pc)
                                             .and_then(|x| x.get_inc());
         item
+    }
+
+    /// get instruction offset for given hart, return None if no instruction found (e.g. pc is out of range)
+    fn get_inst_offset(&self, hart: &Hart) -> Option<usize> {
+        let program = &self.programs[hart.program_id];
+        let text_items = program.get_text_section_items();
+        let item = text_items.get(hart.pc);
+        item.map(|x| x.get_offset())
+    }
+
+    /// get instruction target address for given hart, 
+    /// return None if no instruction found (e.g. pc is out of range)
+    fn get_inst_target(&self, hart_id: HartId) -> Option<usize> {
+        let hart = self.get_hart(hart_id)?;
+        let inst = self.fetch_inst(hart)?;
+        let inst_offset = self.get_inst_offset(hart)?;
+        let target = self.get_i64_from_imm(hart_id, inst.get_imm());
+        Some((inst_offset as i64).wrapping_add(target) as usize)
     }
 
     pub fn step_hart(&mut self, hart_id: HartId) -> Result<(), DebuggerError> {
@@ -603,6 +618,16 @@ impl Machine {
 
                 self.next_pc(hart_id)?;
             }
+            OpCode::Beq => {
+                let lhs = self.get_x(hart_id, inst.get_r0());
+                let rhs = self.get_x(hart_id, inst.get_r1());
+
+                if lhs == rhs {
+                    self.set_pc(hart_id,  self.get_inst_target(hart_id))?;
+                } else {
+                    self.next_pc(hart_id)?;
+                }
+            }
             _ => {
                 return Err(DebuggerError::GeneralError(format!("unsupported instruction: {:?}", opcode)));
             }
@@ -643,6 +668,13 @@ impl Machine {
         let err_msg = format!("invalid hart: {}", hart_id);
         let hart = self.get_hart_mut(hart_id).ok_or_else(|| DebuggerError::GeneralError(err_msg))?;
         hart.next_pc();
+        Ok(())
+    }
+
+    fn set_pc(&mut self, hart_id: HartId, pc: Option<usize>) -> Result<(), DebuggerError> {
+        let err_msg = format!("invalid hart: {}", hart_id);
+        let hart = self.get_hart_mut(hart_id).ok_or_else(|| DebuggerError::GeneralError(err_msg))?;
+        hart.pc = pc.unwrap_or(hart.pc);
         Ok(())
     }
 

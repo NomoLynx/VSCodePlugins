@@ -150,14 +150,17 @@ impl Hart {
         }
     }
 
+    /// increment the program counter to point to the next instruction
     pub fn next_pc(&mut self) {
         self.pc += 1;
     }
 
-    pub fn read_register(
-        &self,
-        reg: &RegisterRef,
-    ) -> RuntimeValue {
+    /// set the program counter to a specific value
+    pub fn set_pc(&mut self, pc: usize) {
+        self.pc = pc;
+    }
+
+    pub fn read_register(&self, reg: &RegisterRef) -> RuntimeValue {
 
         match reg.reg_type {
 
