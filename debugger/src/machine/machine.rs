@@ -7,7 +7,7 @@ use riscv_asm_lib::r5asm::opcode::OpCode;
 use riscv_asm_lib::r5asm::register::Register;
 
 use crate::debugger_error::DebuggerError;
-use crate::machine::hart::Hart;
+use crate::machine::hart::{Hart, PC_INCREMENT};
 use crate::machine::processor::Processor;
 use crate::machine::register_ref::{RegisterRef, RegisterType};
 use crate::memory::memory::Memory;
@@ -145,7 +145,7 @@ impl Machine {
         item.map(|x| x.get_offset())
     }
 
-    /// get instruction target address for given hart, 
+    /// get current instruction target address for given hart, 
     /// return None if no instruction found (e.g. pc is out of range)
     fn get_inst_target(&self, hart_id: HartId) -> Option<usize> {
         let hart = self.get_hart(hart_id)?;
@@ -164,9 +164,9 @@ impl Machine {
             (hart.program_id, hart.pc)
         };
 
+        let prog = &self.programs[program_id];
         if let Some(inst) = 
-            self.programs[program_id]
-                .get_text_section_items()
+            prog.get_text_section_items()
                 .into_iter()
                 .find(|x| x.get_offset() == pc && x.is_inc())
                 .and_then(|x| x.get_inc())
@@ -175,6 +175,10 @@ impl Machine {
             self.execute_inst(hart_id, &inst)
         }
         else {
+            if prog.get_text_section_items().is_empty() {
+                return Err(DebuggerError::GeneralError(format!("no instructions found in program id: {}", program_id)));
+            }
+
             Err(DebuggerError::GeneralError(format!("no instruction found at pc: {}", pc)))
         }
     }
@@ -655,6 +659,79 @@ impl Machine {
                     self.next_pc(hart_id)?;
                 }
             }
+            OpCode::Bne => {
+                let lhs = self.get_x(hart_id, inst.get_r0());
+                let rhs = self.get_x(hart_id, inst.get_r1());
+
+                if lhs != rhs {
+                    self.set_pc(hart_id,  self.get_inst_target(hart_id))?;
+                } else {
+                    self.next_pc(hart_id)?;
+                }
+            }
+            OpCode::Blt => {
+                let lhs = self.get_x(hart_id, inst.get_r0());
+                let rhs = self.get_x(hart_id, inst.get_r1());
+
+                if lhs < rhs {
+                    self.set_pc(hart_id,  self.get_inst_target(hart_id))?;
+                } else {
+                    self.next_pc(hart_id)?;
+                }
+            }
+            OpCode::Bge => {
+                let lhs = self.get_x(hart_id, inst.get_r0());
+                let rhs = self.get_x(hart_id, inst.get_r1());
+
+                if lhs >= rhs {
+                    self.set_pc(hart_id,  self.get_inst_target(hart_id))?;
+                } else {
+                    self.next_pc(hart_id)?;
+                }
+            }
+            OpCode::Bltu => {
+                let lhs = self.get_x(hart_id, inst.get_r0());
+                let rhs = self.get_x(hart_id, inst.get_r1());
+
+                if lhs < rhs {
+                    self.set_pc(hart_id,  self.get_inst_target(hart_id))?;
+                } else {
+                    self.next_pc(hart_id)?;
+                }
+            }
+            OpCode::Bgeu => {
+                let lhs = self.get_x(hart_id, inst.get_r0());
+                let rhs = self.get_x(hart_id, inst.get_r1());
+
+                if lhs >= rhs {
+                    self.set_pc(hart_id,  self.get_inst_target(hart_id))?;
+                } else {
+                    self.next_pc(hart_id)?;
+                }
+            }
+            OpCode::Jal => {
+                let return_pc = self.get_pc(hart_id)? + PC_INCREMENT;
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    return_pc as u64,
+                );
+
+                self.set_pc(hart_id,  self.get_inst_target(hart_id))?;
+            }
+            OpCode::Jalr => {
+                let target =  self.get_x(hart_id, inst.get_r1()) as usize;
+                let return_pc = self.get_pc(hart_id)? + PC_INCREMENT;
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    return_pc as u64,
+                );
+
+                self.set_pc(hart_id, Some(target))?;
+            }
             _ => {
                 return Err(DebuggerError::GeneralError(format!("unsupported instruction: {:?}", opcode)));
             }
@@ -703,6 +780,12 @@ impl Machine {
         let hart = self.get_hart_mut(hart_id).ok_or_else(|| DebuggerError::GeneralError(err_msg))?;
         hart.pc = pc.unwrap_or(hart.pc);
         Ok(())
+    }
+
+    fn get_pc(&self, hart_id: HartId) -> Result<usize, DebuggerError> {
+        let err_msg = format!("invalid hart: {}", hart_id);
+        let hart = self.get_hart(hart_id).ok_or_else(|| DebuggerError::GeneralError(err_msg))?;
+        Ok(hart.pc)
     }
 
     pub fn lookup_register(&self, name: &str) -> Option<RegisterRef> {

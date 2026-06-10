@@ -29,10 +29,13 @@ fn main() {
     hart.write_register(&t2, 20.into());
     
 
-    let r = machine.step_hart(0);
+    let r = machine.step_hart(default_hart_id);
     let result = machine.get_default_hart().unwrap().read_register(&t0);
     
     println!("Result: {:?}", r);
     println!("t0: {:?}", result);
+
+    let r = machine.step_hart(default_hart_id);
+    println!("Result: {:?}", r);
     
 }
