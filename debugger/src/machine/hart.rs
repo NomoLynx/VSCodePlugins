@@ -124,6 +124,7 @@ impl Default for CsrFile {
     }
 }
 
+pub const PC_INCREMENT: usize = 4;
 #[derive(Clone, Debug)]
 pub struct Hart {
     pub id: u64,
@@ -152,7 +153,7 @@ impl Hart {
 
     /// increment the program counter to point to the next instruction
     pub fn next_pc(&mut self) {
-        self.pc += 1;
+        self.pc += PC_INCREMENT;
     }
 
     /// set the program counter to a specific value

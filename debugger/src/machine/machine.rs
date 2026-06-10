@@ -105,17 +105,21 @@ impl Machine {
     /// fetch instruction for given hart, return None if no instruction found (e.g. pc is out of range)
     fn fetch_inst(&self, hart: &Hart) -> Option<&Instruction> {
         let program = &self.programs[hart.program_id];
-        let text_items = program.get_text_section_items();
-        let item = text_items.get(hart.pc)
-                                            .and_then(|x| x.get_inc());
+        let item = program
+            .get_text_section_items()
+            .into_iter()
+            .find(|x| x.get_offset() == hart.pc)
+            .and_then(|x| x.get_inc());
         item
     }
 
     /// get instruction offset for given hart, return None if no instruction found (e.g. pc is out of range)
     fn get_inst_offset(&self, hart: &Hart) -> Option<usize> {
         let program = &self.programs[hart.program_id];
-        let text_items = program.get_text_section_items();
-        let item = text_items.get(hart.pc);
+        let item = program
+            .get_text_section_items()
+            .into_iter()
+            .find(|x| x.get_offset() == hart.pc);
         item.map(|x| x.get_offset())
     }
 
@@ -141,7 +145,8 @@ impl Machine {
         if let Some(inst) = 
             self.programs[program_id]
                 .get_text_section_items()
-                .get(pc)
+                .into_iter()
+                .find(|x| x.get_offset() == pc)
                 .and_then(|x| x.get_inc())
                 .cloned() {
 
