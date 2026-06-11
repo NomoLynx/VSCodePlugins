@@ -1,4 +1,3 @@
-use std::default;
 
 use riscv_asm_lib::r5asm::asm_program::AsmProgram;
 use riscv_asm_lib::r5asm::imm::Imm::{self};
@@ -193,12 +192,56 @@ impl Machine {
             .unwrap() as usize
     }
 
-    fn get_x(
-        &self,
-        hart_id: HartId,
-        reg: Option<&String>,
-    ) -> u64 {
+    fn get_f32(&self, hart_id: HartId, reg: Option<&String>) -> f32 {
+        let idx =
+            self.registers
+                .get_register_value(reg)
+                .unwrap() as usize;
 
+        let hart = self.get_hart(hart_id).unwrap();
+        hart.f.regs[idx].value as f32
+    }
+
+    fn set_f32(&mut self, hart_id: HartId, reg: Option<&String>, value: f32) {
+        let idx =
+            self.registers
+                .get_register_value(reg)
+                .unwrap() as usize;
+
+        let hart = self.get_hart_mut(hart_id).unwrap();
+        hart.f.regs[idx].value = value as f64;
+    }
+
+    fn get_f(&self, hart_id: HartId, reg: Option<&String>) -> f64 {
+        let idx =
+            self.registers
+                .get_register_value(reg)
+                .unwrap() as usize;
+
+        let hart = self.get_hart(hart_id).unwrap();
+        hart.f.regs[idx].value
+    }
+
+    pub fn get_f_bits(&self, hart_id: HartId, reg: Option<&String>) -> u64 {
+        self.get_f(hart_id, reg)
+            .to_bits()
+    }
+
+    pub fn set_f_bits(&mut self, hart_id: HartId, reg: Option<&String>, bits: u64) {
+        self.set_f(hart_id, reg, f64::from_bits(bits));
+    }
+
+    fn set_f(&mut self, hart_id: HartId, reg: Option<&String>, value: f64) {
+        let idx =
+            self.registers
+                .get_register_value(reg)
+                .unwrap() as usize;
+
+        let hart = self.get_hart_mut(hart_id).unwrap();
+        hart.f.regs[idx].value = value;
+    }
+
+    fn get_x(&self, hart_id: HartId, reg: Option<&String>) -> u64 {
         let idx =
             self.registers
                 .get_register_value(reg)
@@ -208,13 +251,7 @@ impl Machine {
         hart.x.regs[idx].value
     }
 
-    fn set_x(
-        &mut self,
-        hart_id: HartId,
-        reg: Option<&String>,
-        value: u64,
-    ) {
-
+    fn set_x(&mut self, hart_id: HartId, reg: Option<&String>, value: u64) {
         let idx =
             self.registers
                 .get_register_value(reg)
@@ -731,6 +768,218 @@ impl Machine {
                 );
 
                 self.set_pc(hart_id, Some(target))?;
+            }
+            OpCode::Faddd=> {
+                let lhs = self.get_f(hart_id, inst.get_r1());
+                let rhs = self.get_f(hart_id, inst.get_r2());
+
+                self.set_f(
+                    hart_id,
+                    inst.get_r0(),
+                    lhs + rhs,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+
+            OpCode::Fsubd => {
+                let lhs = self.get_f(hart_id, inst.get_r1());
+                let rhs = self.get_f(hart_id, inst.get_r2());
+
+                self.set_f(
+                    hart_id,
+                    inst.get_r0(),
+                    lhs - rhs,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+
+            OpCode::Fmuld => {
+                let lhs = self.get_f(hart_id, inst.get_r1());
+                let rhs = self.get_f(hart_id, inst.get_r2());
+
+                self.set_f(
+                    hart_id,
+                    inst.get_r0(),
+                    lhs * rhs,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+
+            OpCode::Fdivd => {
+                let lhs = self.get_f(hart_id, inst.get_r1());
+                let rhs = self.get_f(hart_id, inst.get_r2());
+
+                self.set_f(
+                    hart_id,
+                    inst.get_r0(),
+                    lhs / rhs,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fadds => {
+                let lhs = self.get_f32(hart_id, inst.get_r1());
+                let rhs = self.get_f32(hart_id, inst.get_r2());
+
+                self.set_f32(
+                    hart_id,
+                    inst.get_r0(),
+                    lhs + rhs,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+
+            OpCode::Fsubs => {
+                let lhs = self.get_f32(hart_id, inst.get_r1());
+                let rhs = self.get_f32(hart_id, inst.get_r2());
+
+                self.set_f32(
+                    hart_id,
+                    inst.get_r0(),
+                    lhs - rhs,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+
+            OpCode::Fmuls => {
+                let lhs = self.get_f32(hart_id, inst.get_r1());
+                let rhs = self.get_f32(hart_id, inst.get_r2());
+
+                self.set_f32(
+                    hart_id,
+                    inst.get_r0(),
+                    lhs * rhs,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+
+            OpCode::Fdivs => {
+                let lhs = self.get_f32(hart_id, inst.get_r1());
+                let rhs = self.get_f32(hart_id, inst.get_r2());
+
+                self.set_f32(
+                    hart_id,
+                    inst.get_r0(),
+                    lhs / rhs,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Feqd => {
+                let lhs = self.get_f(hart_id, inst.get_r1());
+                let rhs = self.get_f(hart_id, inst.get_r2());
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    if lhs == rhs { 1 } else { 0 },
+                );
+
+                self.next_pc(hart_id)?;
+            }
+
+            OpCode::Fltd => {
+                let lhs = self.get_f(hart_id, inst.get_r1());
+                let rhs = self.get_f(hart_id, inst.get_r2());
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    if lhs < rhs { 1 } else { 0 },
+                );
+
+                self.next_pc(hart_id)?;
+            }
+
+            OpCode::Fled => {
+                let lhs = self.get_f(hart_id, inst.get_r1());
+                let rhs = self.get_f(hart_id, inst.get_r2());
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    if lhs <= rhs { 1 } else { 0 },
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Feqs => {
+                let lhs = self.get_f32(hart_id, inst.get_r1());
+                let rhs = self.get_f32(hart_id, inst.get_r2());
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    if lhs == rhs { 1 } else { 0 },
+                );
+
+                self.next_pc(hart_id)?;
+            }
+
+            OpCode::Flts => {
+                let lhs = self.get_f32(hart_id, inst.get_r1());
+                let rhs = self.get_f32(hart_id, inst.get_r2());
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    if lhs < rhs { 1 } else { 0 },
+                );
+
+                self.next_pc(hart_id)?;
+            }
+
+            OpCode::Fles => {
+                let lhs = self.get_f32(hart_id, inst.get_r1());
+                let rhs = self.get_f32(hart_id, inst.get_r2());
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    if lhs <= rhs { 1 } else { 0 },
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fmvdx => {
+                let value = self.get_x(hart_id, inst.get_r1());
+                self.set_f_bits(hart_id,inst.get_r0(), value);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fmvxd => {
+                let value = self.get_f_bits(hart_id, inst.get_r1());
+                self.set_x(hart_id, inst.get_r0(), value);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fld => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+                let addr = base.wrapping_add_signed(imm);
+                let bits = self.memory.read_u64(addr);
+
+                self.set_f_bits(
+                    hart_id,
+                    inst.get_r0(),
+                    bits,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fsd => {
+                let bits = self.get_f_bits(hart_id, inst.get_r0());
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+                let addr = base.wrapping_add_signed(imm);
+
+                self.memory.write_u64(addr,bits);
+
+                self.next_pc(hart_id)?;
             }
             _ => {
                 return Err(DebuggerError::GeneralError(format!("unsupported instruction: {:?}", opcode)));
