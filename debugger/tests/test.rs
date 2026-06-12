@@ -37,6 +37,7 @@ fn test_machine_execution() {
 
     let default_hart_id = machine.get_default_hart_id();
     machine.init_hart_to_entry_point(default_hart_id).unwrap();
+    let pc = machine.get_default_hart().unwrap().pc;
 
     let hart = machine.get_default_hart_mut().unwrap();    
     hart.write_register(&t1, 10.into());
@@ -51,4 +52,7 @@ fn test_machine_execution() {
 
     let r = machine.step_hart(default_hart_id);
     assert!(r.is_ok());
+    
+    let pc2 = machine.get_default_hart().unwrap().pc;
+    assert_eq!(pc2, pc);
 }
