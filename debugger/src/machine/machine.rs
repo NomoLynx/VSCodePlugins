@@ -318,34 +318,8 @@ impl Machine {
             OpCode::And => self.binary_operation(hart_id, &inst, |a, b| a & b)?,
             OpCode::Or  => self.binary_operation(hart_id, &inst, |a, b| a | b)?,
             OpCode::Xor => self.binary_operation(hart_id, &inst, |a, b| a ^ b)?,
-            OpCode::Sll => {
-                let lhs = self.get_x(hart_id, inst.get_r1());
-                let rhs = self.get_x(hart_id, inst.get_r2());
-
-                let shamt = (rhs & 0x3f) as u32;
-
-                self.set_x(
-                    hart_id,
-                    inst.get_r0(),
-                    lhs << shamt,
-                );
-
-                self.next_pc(hart_id)?;
-            }
-            OpCode::Srl => {
-                let lhs = self.get_x(hart_id, inst.get_r1());
-                let rhs = self.get_x(hart_id, inst.get_r2());
-
-                let shamt = (rhs & 0x3f) as u32;
-
-                self.set_x(
-                    hart_id,
-                    inst.get_r0(),
-                    lhs >> shamt,
-                );
-
-                self.next_pc(hart_id)?;
-            }
+            OpCode::Sll => self.binary_operation(hart_id, &inst, |a, b| a << (b & 0x3f) as u32)?,
+            OpCode::Srl => self.binary_operation(hart_id, &inst, |a, b| a >> (b & 0x3f) as u32)?,
             OpCode::Sra => {
                 let lhs = self.get_x(hart_id, inst.get_r1()) as i64;
                 let rhs = self.get_x(hart_id, inst.get_r2());
