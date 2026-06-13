@@ -85,6 +85,12 @@ fn test_data_load() {
     let r = machine.step_hart(default_hart_id);
     assert!(r.is_ok());
 
+    let r = machine.step_hart(default_hart_id);
+    assert!(r.is_ok());
+
+    let has_inst = machine.has_inst_at_pc(default_hart_id);
+    assert_eq!(has_inst, false);
+
     let result = machine.get_default_hart().unwrap().read_register(&t1);
     assert_eq!(result, 1.into());
 }

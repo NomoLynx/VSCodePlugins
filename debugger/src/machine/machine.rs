@@ -321,29 +321,15 @@ impl Machine {
             OpCode::And => {
                 let lhs = self.get_x(hart_id, inst.get_r1());
                 let rhs = self.get_x(hart_id, inst.get_r2());
-
-                self.set_x(
-                    hart_id,
-                    inst.get_r0(),
-                    lhs & rhs,
-                );
-
+                self.set_x(hart_id, inst.get_r0(), lhs & rhs);
                 self.next_pc(hart_id)?;
             }
-
             OpCode::Or => {
                 let lhs = self.get_x(hart_id, inst.get_r1());
                 let rhs = self.get_x(hart_id, inst.get_r2());
-
-                self.set_x(
-                    hart_id,
-                    inst.get_r0(),
-                    lhs | rhs,
-                );
-
+                self.set_x(hart_id, inst.get_r0(), lhs | rhs);
                 self.next_pc(hart_id)?;
             }
-
             OpCode::Xor => {
                 let lhs = self.get_x(hart_id, inst.get_r1());
                 let rhs = self.get_x(hart_id, inst.get_r2());
