@@ -32,7 +32,6 @@ impl Machine {
             processors: vec![],
             programs: vec![],
             memory: Memory::default(),
-
             registers: Register::new(),
         };
 
@@ -40,15 +39,9 @@ impl Machine {
         r
     }
 
-    pub fn add_program(
-        &mut self,
-        program: AsmProgram,
-    ) -> ProgramId {
-
+    pub fn add_program(&mut self, program: AsmProgram) -> ProgramId {
         let id = self.programs.len();
-
         self.load_program_memory(&program);
-
         self.programs.push(program);
 
         id
@@ -172,6 +165,16 @@ impl Machine {
         let inst = self.fetch_inst(hart)?;
 
         Some(inst.get_virtual_address() as usize)
+    }
+
+    /// check if there is an instruction at current pc of given hart
+    pub fn has_inst_at_pc(&self, hart_id: HartId) -> bool {
+        let hart = self.get_hart(hart_id);
+        if let Some(hart) = hart {
+            self.fetch_inst(hart).is_some()
+        } else {
+            false
+        }
     }
 
     pub fn step_hart(&mut self, hart_id: HartId) -> Result<(), DebuggerError> {
@@ -312,16 +315,9 @@ impl Machine {
             OpCode::Sub => {
                 let lhs = self.get_x(hart_id, inst.get_r1());
                 let rhs = self.get_x(hart_id, inst.get_r2());
-
-                self.set_x(
-                    hart_id,
-                    inst.get_r0(),
-                    lhs.wrapping_sub(rhs),
-                );
-
+                self.set_x(hart_id, inst.get_r0(), lhs.wrapping_sub(rhs));
                 self.next_pc(hart_id)?;
             }
-
             OpCode::And => {
                 let lhs = self.get_x(hart_id, inst.get_r1());
                 let rhs = self.get_x(hart_id, inst.get_r2());
@@ -351,13 +347,7 @@ impl Machine {
             OpCode::Xor => {
                 let lhs = self.get_x(hart_id, inst.get_r1());
                 let rhs = self.get_x(hart_id, inst.get_r2());
-
-                self.set_x(
-                    hart_id,
-                    inst.get_r0(),
-                    lhs ^ rhs,
-                );
-
+                self.set_x(hart_id, inst.get_r0(), lhs ^ rhs);
                 self.next_pc(hart_id)?;
             }
             OpCode::Sll => {

@@ -5,7 +5,8 @@ mod trace;
 mod debug;
 mod debugger_error;
 
-use core_utils::filesystem::read_file_to_string;
+use core_utils::filesystem::*;
+use core_utils::debug::*;
 use riscv_asm_lib::r5asm::assembler::*;
 
 use crate::machine::machine::Machine;
@@ -30,6 +31,13 @@ fn main() {
 
     let r = machine.step_hart(default_hart_id);
     assert!(r.is_ok());
+
+    let r = machine.step_hart(default_hart_id);
+    assert!(r.is_ok());
+
+    let has_inst = machine.has_inst_at_pc(default_hart_id);
+    debug_string(format!("Has instruction at PC: {}", has_inst));
+    assert_eq!(has_inst, false);
 
     let result = machine.get_default_hart().unwrap().read_register(&t1);
     assert_eq!(result, 1.into());
