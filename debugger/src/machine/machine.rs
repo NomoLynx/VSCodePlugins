@@ -301,41 +301,23 @@ impl Machine {
         }
     }
 
+    fn binary_operation(&mut self, hart_id: HartId, inst: &Instruction, op: impl Fn(u64, u64) -> u64) -> Result<(), DebuggerError> {
+        let lhs = self.get_x(hart_id, inst.get_r1());
+        let rhs = self.get_x(hart_id, inst.get_r2());
+        self.set_x(hart_id, inst.get_r0(), op(lhs, rhs));
+        self.next_pc(hart_id)
+    }
+
     fn execute_inst(&mut self, hart_id: HartId, inst: &Instruction) -> Result<(), DebuggerError> {
         let opcode = inst.get_op_code()
                     .map_err(|x| DebuggerError::GeneralError(x.get_error_message()))?;
 
         match opcode {
-            OpCode::Add => {
-                let lhs = self.get_x(hart_id, inst.get_r1());
-                let rhs = self.get_x(hart_id, inst.get_r2());
-                self.set_x(hart_id, inst.get_r0(),lhs.wrapping_add(rhs));
-                self.next_pc(hart_id)?;
-            }
-            OpCode::Sub => {
-                let lhs = self.get_x(hart_id, inst.get_r1());
-                let rhs = self.get_x(hart_id, inst.get_r2());
-                self.set_x(hart_id, inst.get_r0(), lhs.wrapping_sub(rhs));
-                self.next_pc(hart_id)?;
-            }
-            OpCode::And => {
-                let lhs = self.get_x(hart_id, inst.get_r1());
-                let rhs = self.get_x(hart_id, inst.get_r2());
-                self.set_x(hart_id, inst.get_r0(), lhs & rhs);
-                self.next_pc(hart_id)?;
-            }
-            OpCode::Or => {
-                let lhs = self.get_x(hart_id, inst.get_r1());
-                let rhs = self.get_x(hart_id, inst.get_r2());
-                self.set_x(hart_id, inst.get_r0(), lhs | rhs);
-                self.next_pc(hart_id)?;
-            }
-            OpCode::Xor => {
-                let lhs = self.get_x(hart_id, inst.get_r1());
-                let rhs = self.get_x(hart_id, inst.get_r2());
-                self.set_x(hart_id, inst.get_r0(), lhs ^ rhs);
-                self.next_pc(hart_id)?;
-            }
+            OpCode::Add => self.binary_operation(hart_id, &inst, u64::wrapping_add)?,
+            OpCode::Sub => self.binary_operation(hart_id, &inst, u64::wrapping_sub)?,
+            OpCode::And => self.binary_operation(hart_id, &inst, |a, b| a & b)?,
+            OpCode::Or  => self.binary_operation(hart_id, &inst, |a, b| a | b)?,
+            OpCode::Xor => self.binary_operation(hart_id, &inst, |a, b| a ^ b)?,
             OpCode::Sll => {
                 let lhs = self.get_x(hart_id, inst.get_r1());
                 let rhs = self.get_x(hart_id, inst.get_r2());
