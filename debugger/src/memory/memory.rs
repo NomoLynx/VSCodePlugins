@@ -91,6 +91,22 @@ impl Memory {
         region.bytes[offset] = value;
     }
 
+    pub fn write_bytes(
+        &mut self,
+        addr: u64,
+        values: &[u8],
+    ) {
+
+        let region =
+            self.find_region_mut(addr, values.len());
+
+        let offset =
+            region.offset(addr);
+
+        region.bytes[offset..offset + values.len()]
+            .copy_from_slice(values);
+    }
+
     //
     // 16-bit
     //

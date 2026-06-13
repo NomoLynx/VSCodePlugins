@@ -8,4 +8,7 @@ fn main() {
 
     println!("cargo:return-if-changed=tests/code.asm");
     copy_to_output("tests/code.asm", build_type).expect("Failed to copy code.asm to output directory");
+
+    println!("cargo:return-if-changed=tests/code2.asm");
+    copy_to_output("tests/code2.asm", build_type).expect("Failed to copy code2.asm to output directory");
 }

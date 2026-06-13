@@ -47,9 +47,30 @@ impl Machine {
 
         let id = self.programs.len();
 
+        self.load_program_memory(&program);
+
         self.programs.push(program);
 
         id
+    }
+
+    fn load_program_memory(&mut self, program: &AsmProgram) {
+        for item in program.get_non_text_section_items() {
+            let Some(directive) = item.get_directive() else {
+                continue;
+            };
+
+            let Some(machine_code) = directive.get_machine_code() else {
+                continue;
+            };
+
+            let bytes = machine_code.get_code_data().to_vec();
+            if bytes.is_empty() {
+                continue;
+            }
+
+            self.memory.write_bytes(item.get_offset() as u64, &bytes);
+        }
     }
 
     pub fn add_processor(&mut self, processor: Processor) {
@@ -149,9 +170,8 @@ impl Machine {
     fn get_inst_target(&self, hart_id: HartId) -> Option<usize> {
         let hart = self.get_hart(hart_id)?;
         let inst = self.fetch_inst(hart)?;
-        let inst_offset = self.get_inst_offset(hart)?;
-        let target = self.get_i64_from_imm(hart_id, inst.get_imm());
-        Some((inst_offset as i64).wrapping_add(target) as usize)
+
+        Some(inst.get_virtual_address() as usize)
     }
 
     pub fn step_hart(&mut self, hart_id: HartId) -> Result<(), DebuggerError> {
@@ -170,7 +190,6 @@ impl Machine {
                 .find(|x| x.get_offset() == pc && x.is_inc())
                 .and_then(|x| x.get_inc())
                 .cloned() {
-
             self.execute_inst(hart_id, &inst)
         }
         else {
@@ -260,6 +279,22 @@ impl Machine {
         let hart = self.get_hart_mut(hart_id).unwrap();
         if idx != 0 {
             hart.x.regs[idx].value = value;
+        }
+    }
+
+    fn get_resolved_u64(&self, hart_id: HartId, inst: &Instruction) -> u64 {
+        if inst.get_rel_fun().is_some() {
+            inst.get_virtual_address() as u64
+        } else {
+            self.get_u64_from_imm(hart_id, inst.get_imm())
+        }
+    }
+
+    fn get_resolved_i64(&self, hart_id: HartId, inst: &Instruction) -> i64 {
+        if inst.get_rel_fun().is_some() {
+            inst.get_virtual_address() as i32 as i64
+        } else {
+            self.get_i64_from_imm(hart_id, inst.get_imm())
         }
     }
 
@@ -406,7 +441,7 @@ impl Machine {
             }
             OpCode::Addi => {
                 let lhs = self.get_x(hart_id, inst.get_r1());
-                let imm = self.get_u64_from_imm(hart_id, inst.get_imm()) as i64;
+                let imm = self.get_resolved_i64(hart_id, inst);
 
                 self.set_x(
                     hart_id,
@@ -418,7 +453,7 @@ impl Machine {
             }
             OpCode::Andi => {
                 let lhs = self.get_x(hart_id, inst.get_r1());
-                let imm =self.get_u64_from_imm(hart_id, inst.get_imm());
+                let imm = self.get_resolved_i64(hart_id, inst) as u64;
 
                 self.set_x(
                     hart_id,
@@ -430,7 +465,7 @@ impl Machine {
             }
             OpCode::Ori => {
                 let lhs = self.get_x(hart_id, inst.get_r1());
-                let imm =self.get_u64_from_imm(hart_id, inst.get_imm());
+                let imm = self.get_resolved_i64(hart_id, inst) as u64;
 
                 self.set_x(
                     hart_id,
@@ -442,7 +477,7 @@ impl Machine {
             }
             OpCode::Xori => {
                 let lhs = self.get_x(hart_id, inst.get_r1());
-                let imm =self.get_u64_from_imm(hart_id, inst.get_imm());
+                let imm = self.get_resolved_i64(hart_id, inst) as u64;
 
                 self.set_x(
                     hart_id,
@@ -455,7 +490,7 @@ impl Machine {
             OpCode::Slti => {
 
                 let lhs = self.get_x(hart_id, inst.get_r1()) as i64;
-                let imm =self.get_u64_from_imm(hart_id, inst.get_imm()) as i64;
+                let imm = self.get_resolved_i64(hart_id, inst);
 
                 self.set_x(
                     hart_id,
@@ -467,7 +502,7 @@ impl Machine {
             }
             OpCode::Sltiu => {
                 let lhs = self.get_x(hart_id, inst.get_r1());
-                let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
+                let imm = self.get_resolved_i64(hart_id, inst) as u64;
 
                 self.set_x(
                     hart_id,
@@ -479,7 +514,7 @@ impl Machine {
             }
             OpCode::Slli => {
                 let lhs = self.get_x(hart_id, inst.get_r1());
-                let shamt = (self.get_u64_from_imm(hart_id, inst.get_imm()) as u64 & 0x3f)  as u32;
+                let shamt = (self.get_resolved_u64(hart_id, inst) & 0x3f) as u32;
 
                 self.set_x(
                     hart_id,
@@ -491,7 +526,7 @@ impl Machine {
             }
             OpCode::Srli => {
                 let lhs = self.get_x(hart_id, inst.get_r1());
-                let shamt = (self.get_u64_from_imm(hart_id, inst.get_imm()) as u64 & 0x3f)  as u32;
+                let shamt = (self.get_resolved_u64(hart_id, inst) & 0x3f) as u32;
 
                 self.set_x(
                     hart_id,
@@ -502,8 +537,8 @@ impl Machine {
                 self.next_pc(hart_id)?;
             }
             OpCode::Srai => {
-                let lhs = self.get_x(hart_id, inst.get_r1());
-                let shamt = (self.get_u64_from_imm(hart_id, inst.get_imm()) as u64 & 0x3f)  as u32;
+                let lhs = self.get_x(hart_id, inst.get_r1()) as i64;
+                let shamt = (self.get_resolved_u64(hart_id, inst) & 0x3f) as u32;
 
                 self.set_x(
                     hart_id,
@@ -514,19 +549,19 @@ impl Machine {
                 self.next_pc(hart_id)?;
             }
             OpCode::Lui => {
-                let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
+                let imm = self.get_resolved_i64(hart_id, inst);
 
                 self.set_x(
                     hart_id,
                     inst.get_r0(),
-                    imm << 12,
+                    (imm << 12) as u64,
                 );
 
                 self.next_pc(hart_id)?;
             }
             OpCode::Lb => {
                 let base = self.get_x(hart_id, inst.get_r1());
-                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+                let imm = self.get_resolved_i64(hart_id, inst);
 
                 let addr = base.wrapping_add_signed(imm);
                 let value =  self.memory.read_i8(addr) as i64 as u64;
@@ -541,7 +576,7 @@ impl Machine {
             }
             OpCode::Lbu => {
                 let base = self.get_x(hart_id, inst.get_r1());
-                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+                let imm = self.get_resolved_i64(hart_id, inst);
 
                 let addr = base.wrapping_add_signed(imm);
 
@@ -557,7 +592,7 @@ impl Machine {
             }
             OpCode::Lh => {
                 let base = self.get_x(hart_id, inst.get_r1());
-                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+                let imm = self.get_resolved_i64(hart_id, inst);
 
                 let addr = base.wrapping_add_signed(imm);
                 let value =  self.memory.read_i16(addr) as i64 as u64;
@@ -572,7 +607,7 @@ impl Machine {
             }
             OpCode::Lhu => {
                 let base = self.get_x(hart_id, inst.get_r1());
-                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+                let imm = self.get_resolved_i64(hart_id, inst);
 
                 let addr = base.wrapping_add_signed(imm);
                 let value = self.memory.read_u16(addr) as u64;
@@ -587,7 +622,7 @@ impl Machine {
             }
             OpCode::Lw => {
                 let base = self.get_x(hart_id, inst.get_r1());
-                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+                let imm = self.get_resolved_i64(hart_id, inst);
 
                 let addr = base.wrapping_add_signed(imm);
                 let value =  self.memory.read_i32(addr) as i64 as u64;
@@ -602,7 +637,7 @@ impl Machine {
             }
             OpCode::Lwu => {
                 let base = self.get_x(hart_id, inst.get_r1());
-                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+                let imm = self.get_resolved_i64(hart_id, inst);
 
                 let addr = base.wrapping_add_signed(imm);
                 let value = self.memory.read_u32(addr)  as u64;
@@ -617,7 +652,7 @@ impl Machine {
             }
             OpCode::Ld => {
                 let base = self.get_x(hart_id, inst.get_r1());
-                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+                let imm = self.get_resolved_i64(hart_id, inst);
 
                 let addr = base.wrapping_add_signed(imm);
                 let value = self.memory.read_u64(addr);
@@ -634,7 +669,7 @@ impl Machine {
                 let value = self.get_x(hart_id, inst.get_r0());
                 let base = self.get_x(hart_id, inst.get_r1());
 
-                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+                let imm = self.get_resolved_i64(hart_id, inst);
                 let addr = base.wrapping_add_signed(imm);
 
                 self.memory.write_u8(
@@ -648,7 +683,7 @@ impl Machine {
                 let value = self.get_x(hart_id, inst.get_r0());
                 let base = self.get_x(hart_id, inst.get_r1());
 
-                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+                let imm = self.get_resolved_i64(hart_id, inst);
                 let addr = base.wrapping_add_signed(imm);
 
                 self.memory.write_u16(
@@ -662,7 +697,7 @@ impl Machine {
                 let value = self.get_x(hart_id, inst.get_r0());
                 let base = self.get_x(hart_id, inst.get_r1());
 
-                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+                let imm = self.get_resolved_i64(hart_id, inst);
                 let addr = base.wrapping_add_signed(imm);
 
                 self.memory.write_u32(
@@ -676,7 +711,7 @@ impl Machine {
                 let value = self.get_x(hart_id, inst.get_r0());
                 let base = self.get_x(hart_id, inst.get_r1());
 
-                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+                let imm = self.get_resolved_i64(hart_id, inst);
                 let addr = base.wrapping_add_signed(imm);
 
                 self.memory.write_u64(
@@ -746,6 +781,18 @@ impl Machine {
                     self.next_pc(hart_id)?;
                 }
             }
+            OpCode::Auipc => {
+                let imm = self.get_resolved_i64(hart_id, inst) << 12;
+                let pc = self.get_pc(hart_id)? as u64;
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    pc.wrapping_add_signed(imm),
+                );
+
+                self.next_pc(hart_id)?;
+            }
             OpCode::Jal => {
                 let return_pc = self.get_pc(hart_id)? + PC_INCREMENT;
 
@@ -758,7 +805,9 @@ impl Machine {
                 self.set_pc(hart_id,  self.get_inst_target(hart_id))?;
             }
             OpCode::Jalr => {
-                let target =  self.get_x(hart_id, inst.get_r1()) as usize;
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_resolved_i64(hart_id, inst);
+                let target = base.wrapping_add_signed(imm) as usize & !1usize;
                 let return_pc = self.get_pc(hart_id)? + PC_INCREMENT;
 
                 self.set_x(
@@ -959,7 +1008,7 @@ impl Machine {
             }
             OpCode::Fld => {
                 let base = self.get_x(hart_id, inst.get_r1());
-                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+                let imm = self.get_resolved_i64(hart_id, inst);
                 let addr = base.wrapping_add_signed(imm);
                 let bits = self.memory.read_u64(addr);
 
@@ -974,7 +1023,7 @@ impl Machine {
             OpCode::Fsd => {
                 let bits = self.get_f_bits(hart_id, inst.get_r0());
                 let base = self.get_x(hart_id, inst.get_r1());
-                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+                let imm = self.get_resolved_i64(hart_id, inst);
                 let addr = base.wrapping_add_signed(imm);
 
                 self.memory.write_u64(addr,bits);

@@ -13,7 +13,7 @@ use crate::machine::machine::Machine;
 fn main() {
     let mut machine = Machine::default();
 
-    let asm_prog_text = read_file_to_string("./tests/code.asm");
+    let asm_prog_text = read_file_to_string("code2.asm");
     let program = parse_asm_use_default_config(&asm_prog_text).unwrap();
     machine.add_program(program);
 
@@ -23,17 +23,14 @@ fn main() {
 
     let default_hart_id = machine.get_default_hart_id();
     machine.init_hart_to_entry_point(default_hart_id).unwrap();
-
-    let hart = machine.get_default_hart_mut().unwrap();
-    hart.write_register(&t1, 10.into());
-    hart.write_register(&t2, 20.into());
+    let pc = machine.get_default_hart().unwrap().pc;
 
     let r = machine.step_hart(default_hart_id);
-    let result = machine.get_default_hart().unwrap().read_register(&t0);
-
-    println!("Result: {:?}", r);
-    println!("t0: {:?}", result);
+    assert!(r.is_ok());
 
     let r = machine.step_hart(default_hart_id);
-    println!("Result: {:?}", r);
+    assert!(r.is_ok());
+
+    let result = machine.get_default_hart().unwrap().read_register(&t1);
+    assert_eq!(result, 1.into());
 }
