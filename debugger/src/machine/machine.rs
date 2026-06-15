@@ -320,20 +320,7 @@ impl Machine {
             OpCode::Xor => self.binary_operation(hart_id, &inst, |a, b| a ^ b)?,
             OpCode::Sll => self.binary_operation(hart_id, &inst, |a, b| a << (b & 0x3f) as u32)?,
             OpCode::Srl => self.binary_operation(hart_id, &inst, |a, b| a >> (b & 0x3f) as u32)?,
-            OpCode::Sra => {
-                let lhs = self.get_x(hart_id, inst.get_r1()) as i64;
-                let rhs = self.get_x(hart_id, inst.get_r2());
-
-                let shamt = (rhs & 0x3f) as u32;
-
-                self.set_x(
-                    hart_id,
-                    inst.get_r0(),
-                    (lhs >> shamt) as u64,
-                );
-
-                self.next_pc(hart_id)?;
-            }
+            OpCode::Sra => self.binary_operation(hart_id, &inst, |a, b| ((a as i64) >> (b & 0x3f) as u32) as u64)?,
             OpCode::Slt => {
                 let lhs = self.get_x(hart_id, inst.get_r1()) as i64;
                 let rhs = self.get_x(hart_id, inst.get_r2()) as i64;
