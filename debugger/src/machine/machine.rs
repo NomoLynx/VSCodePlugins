@@ -321,43 +321,9 @@ impl Machine {
             OpCode::Sll => self.binary_operation(hart_id, &inst, |a, b| a << (b & 0x3f) as u32)?,
             OpCode::Srl => self.binary_operation(hart_id, &inst, |a, b| a >> (b & 0x3f) as u32)?,
             OpCode::Sra => self.binary_operation(hart_id, &inst, |a, b| ((a as i64) >> (b & 0x3f) as u32) as u64)?,
-            OpCode::Slt => {
-                let lhs = self.get_x(hart_id, inst.get_r1()) as i64;
-                let rhs = self.get_x(hart_id, inst.get_r2()) as i64;
-
-                self.set_x(
-                    hart_id,
-                    inst.get_r0(),
-                    if lhs < rhs { 1 } else { 0 },
-                );
-
-                self.next_pc(hart_id)?;
-            }
-
-            OpCode::Sltu => {
-                let lhs = self.get_x(hart_id, inst.get_r1());
-                let rhs = self.get_x(hart_id, inst.get_r2());
-
-                self.set_x(
-                    hart_id,
-                    inst.get_r0(),
-                    if lhs < rhs { 1 } else { 0 },
-                );
-
-                self.next_pc(hart_id)?;
-            }
-            OpCode::Mul => {
-                let lhs = self.get_x(hart_id, inst.get_r1());
-                let rhs = self.get_x(hart_id, inst.get_r2());
-
-                self.set_x(
-                    hart_id,
-                    inst.get_r0(),
-                    lhs.wrapping_mul(rhs),
-                );
-
-                self.next_pc(hart_id)?;
-            }
+            OpCode::Slt  => self.binary_operation(hart_id, &inst, |a, b| ((a as i64) < (b as i64)) as u64)?,
+            OpCode::Sltu => self.binary_operation(hart_id, &inst, |a, b| (a < b) as u64)?,
+            OpCode::Mul  => self.binary_operation(hart_id, &inst, |a, b| a.wrapping_mul(b))?,
             OpCode::Addi => {
                 let lhs = self.get_x(hart_id, inst.get_r1());
                 let imm = self.get_resolved_i64(hart_id, inst);

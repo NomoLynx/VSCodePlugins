@@ -16,6 +16,44 @@ function serverBinaryName(): string {
     : "rust_keyword_lsp_server";
 }
 
+function debuggerBinaryName(): string {
+  return process.platform === "win32"
+    ? "riscv_debug_adapter.exe"
+    : "riscv_debug_adapter";
+}
+
+class RiscvDebugAdapterFactory
+  implements vscode.DebugAdapterDescriptorFactory {
+
+  constructor(
+    private readonly context: vscode.ExtensionContext
+  ) {}
+
+  createDebugAdapterDescriptor(
+    session: vscode.DebugSession
+  ): vscode.ProviderResult<vscode.DebugAdapterDescriptor> {
+
+    const adapterPath = path.join(
+      this.context.extensionPath,
+      "server",
+      "target",
+      "release",
+      debuggerBinaryName()
+    );
+
+    console.log("RISC-V DAP PATH:", adapterPath);
+
+    if (!fs.existsSync(adapterPath)) {
+      vscode.window.showErrorMessage(
+        "❌ RISC-V Debug Adapter NOT FOUND: " + adapterPath
+      );
+      return;
+    }
+
+    return new vscode.DebugAdapterExecutable(adapterPath);
+  }
+}
+
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
 
   const serverPath = path.join(
@@ -60,6 +98,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
 
   console.log("RISC-V extension starting...");
+
+  context.subscriptions.push(
+    vscode.debug.registerDebugAdapterDescriptorFactory(
+      "riscv",
+      new RiscvDebugAdapterFactory(context)
+    )
+  );
 
   try {
     await client.start();

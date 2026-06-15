@@ -131,38 +131,30 @@
       }
     },
     "debuggers": [
-    {
-      "type": "riscv",
-      "label": "RISC-V Assembly Debugger",
-
-      "languages": ["riscvasm"],
-
-      "program": "./bin/riscv-debug-adapter",
-
-      "runtime": "node",
-
-      "configurationAttributes": {
-        "launch": {
-          "required": ["program"],
-          "properties": {
-            "program": {
-              "type": "string",
-              "description": "RISC-V ELF file to debug"
+      {
+        "type": "riscv",
+        "label": "RISC-V Assembly Debugger",
+        "languages": ["riscvasm"],
+        "configurationAttributes": {
+          "launch": {
+            "required": ["program"],
+            "properties": {
+              "program": {
+                "type": "string"
+              }
             }
           }
-        }
-      },
-
-      "initialConfigurations": [
-        {
-          "type": "riscv",
-          "request": "launch",
-          "name": "Debug RISC-V ASM",
-          "program": "${file}"
-        }
-      ]
-    }
-  ]
+        },
+        "initialConfigurations": [
+          {
+            "type": "riscv",
+            "request": "launch",
+            "name": "Debug RISC-V Assembly",
+            "program": "${file}"
+          }
+        ]
+      }
+    ]
   },
   "scripts": {
     "compile": "tsc -p ./",
