@@ -141,6 +141,10 @@
             "properties": {
               "program": {
                 "type": "string"
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "default": true
               }
             }
           }
@@ -150,7 +154,8 @@
             "type": "riscv",
             "request": "launch",
             "name": "Debug RISC-V Assembly",
-            "program": "${file}"
+            "program": "${file}",
+            "stopOnEntry": true
           }
         ]
       }
@@ -160,7 +165,9 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "build-server": "cargo build --manifest-path ./server/Cargo.toml",
-    "build-server-release": "cargo build --release --manifest-path ./server/Cargo.toml"
+    "build-server-release": "cargo build --release --manifest-path ./server/Cargo.toml",
+    "build-debugger": "cargo build --manifest-path ./debugger/Cargo.toml",
+    "build-debugger-release": "cargo build --release --manifest-path ./debugger/Cargo.toml"
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"

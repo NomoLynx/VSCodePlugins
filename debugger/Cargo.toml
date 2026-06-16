@@ -6,6 +6,10 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Tao Liu <ttliu2000@hotmail.com>"]
 
+[[bin]]
+name = "riscv_debug_adapter"
+path = "src/main.rs"
+
 [dependencies]
 
 # asm lib
