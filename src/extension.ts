@@ -69,7 +69,9 @@ class RiscvDebugAdapterFactory
         debuggerPath,
         [
             "--log-file",
-            logFile
+            logFile,
+            "--extension-root",
+            this.context.extensionPath
         ]
     );
   }
