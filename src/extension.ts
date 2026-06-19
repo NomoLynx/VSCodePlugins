@@ -10,6 +10,8 @@ import {
 
 let client: LanguageClient | undefined;
 
+let outputChannel: vscode.OutputChannel;
+
 function serverBinaryName(): string {
   return process.platform === "win32"
     ? "rust_keyword_lsp_server.exe"
@@ -26,35 +28,39 @@ class RiscvDebugAdapterFactory
   implements vscode.DebugAdapterDescriptorFactory {
 
   constructor(
-    private readonly context: vscode.ExtensionContext
+    private readonly context: vscode.ExtensionContext,
+    private readonly output: vscode.OutputChannel
   ) {}
 
   createDebugAdapterDescriptor(
     session: vscode.DebugSession
   ): vscode.ProviderResult<vscode.DebugAdapterDescriptor> {
 
-    const adapterPath = path.join(
+    const debuggerPath = path.join(
       this.context.extensionPath,
       "debugger",
       "target",
       "release",
-      debuggerBinaryName()
+      "riscv_debug_adapter.exe"
     );
 
-    console.log("RISC-V DAP PATH:", adapterPath);
+    this.output.appendLine("Launching debugger:");
+    this.output.appendLine(debuggerPath);
 
-    if (!fs.existsSync(adapterPath)) {
-      vscode.window.showErrorMessage(
-        "❌ RISC-V Debug Adapter NOT FOUND: " + adapterPath
-      );
+    if (!fs.existsSync(debuggerPath)) {
+      this.output.appendLine("❌ debugger not found");
+      vscode.window.showErrorMessage("Debugger not found");
       return;
     }
 
-    return new vscode.DebugAdapterExecutable(adapterPath);
+    return new vscode.DebugAdapterExecutable(debuggerPath);
   }
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+
+  outputChannel = vscode.window.createOutputChannel("RISC-V Debugger");
+  outputChannel.appendLine("Debugger extension activated");
 
   const serverPath = path.join(
     context.extensionPath,
@@ -102,7 +108,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(
     vscode.debug.registerDebugAdapterDescriptorFactory(
       "riscv",
-      new RiscvDebugAdapterFactory(context)
+      new RiscvDebugAdapterFactory(context, outputChannel)
     )
   );
 
