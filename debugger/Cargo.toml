@@ -12,6 +12,10 @@ path = "src/main.rs"
 
 [dependencies]
 
+#log4rs 
+log = "*"
+log4rs = "*"
+
 # asm lib
 riscv_asm_lib = { path = "../../riscv_asm_lib" }
 core_utils = { path = "../../core_utils" }
