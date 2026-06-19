@@ -35,7 +35,7 @@ class RiscvDebugAdapterFactory
 
     const adapterPath = path.join(
       this.context.extensionPath,
-      "server",
+      "debugger",
       "target",
       "release",
       debuggerBinaryName()
