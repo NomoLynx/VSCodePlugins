@@ -53,7 +53,25 @@ class RiscvDebugAdapterFactory
       return;
     }
 
-    return new vscode.DebugAdapterExecutable(debuggerPath);
+    const logDir = path.join(
+        this.context.extensionPath,
+        "logs"
+    );
+
+    fs.mkdirSync(logDir, { recursive: true });
+
+    const logFile = path.join(
+        logDir,
+        "riscv_debugger.log"
+    );
+
+    return new vscode.DebugAdapterExecutable(
+        debuggerPath,
+        [
+            "--log-file",
+            logFile
+        ]
+    );
   }
 }
 
