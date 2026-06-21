@@ -25,3 +25,6 @@ bin/
 #exclude logs folder anywhere in the path
 logs/
 server/*.log
+.vs/VSWorkspaceState.json
+.vs/VSCodePlugins/v17/.wsuo
+.vs/VSCodePlugins/v17/DocumentLayout.json

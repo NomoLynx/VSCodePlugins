@@ -334,6 +334,198 @@ impl Machine {
 
                 self.next_pc(hart_id)?;
             }
+            OpCode::Andn => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+                self.set_x(hart_id, inst.get_r0(), lhs & !rhs);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Orn => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+                self.set_x(hart_id, inst.get_r0(), lhs | !rhs);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Xnor => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+                self.set_x(hart_id, inst.get_r0(), !(lhs ^ rhs));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Rol => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+                let shamt = (rhs & 0x3f) as u32;
+                self.set_x(hart_id, inst.get_r0(), lhs.rotate_left(shamt));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Ror => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+                let shamt = (rhs & 0x3f) as u32;
+                self.set_x(hart_id, inst.get_r0(), lhs.rotate_right(shamt));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Rori => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let shamt = (self.get_resolved_u64(hart_id, inst) & 0x3f) as u32;
+                self.set_x(hart_id, inst.get_r0(), lhs.rotate_right(shamt));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Clz => {
+                let val = self.get_x(hart_id, inst.get_r1());
+                self.set_x(hart_id, inst.get_r0(), val.leading_zeros() as u64);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Ctz => {
+                let val = self.get_x(hart_id, inst.get_r1());
+                self.set_x(hart_id, inst.get_r0(), val.trailing_zeros() as u64);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Cpop => {
+                let val = self.get_x(hart_id, inst.get_r1());
+                self.set_x(hart_id, inst.get_r0(), val.count_ones() as u64);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Sextb => {
+                let val = self.get_x(hart_id, inst.get_r1()) as i8 as i64 as u64;
+                self.set_x(hart_id, inst.get_r0(), val);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Sexth => {
+                let val = self.get_x(hart_id, inst.get_r1()) as i16 as i64 as u64;
+                self.set_x(hart_id, inst.get_r0(), val);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Zexth => {
+                let val = self.get_x(hart_id, inst.get_r1()) as u16 as u64;
+                self.set_x(hart_id, inst.get_r0(), val);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Orcb => {
+                let val = self.get_x(hart_id, inst.get_r1());
+                let mut result: u64 = 0;
+                for i in 0..8 {
+                    if (val >> (i * 8)) & 0xff != 0 {
+                        result |= 0xffu64 << (i * 8);
+                    }
+                }
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Rev8 => {
+                let val = self.get_x(hart_id, inst.get_r1());
+                let result = val.swap_bytes();
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Bclr => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+                self.set_x(hart_id, inst.get_r0(), lhs & !(1u64 << (rhs & 0x3f)));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Bclri => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let shamt = self.get_resolved_u64(hart_id, inst) & 0x3f;
+                self.set_x(hart_id, inst.get_r0(), lhs & !(1u64 << shamt));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Bset => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+                self.set_x(hart_id, inst.get_r0(), lhs | (1u64 << (rhs & 0x3f)));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Bseti => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let shamt = self.get_resolved_u64(hart_id, inst) & 0x3f;
+                self.set_x(hart_id, inst.get_r0(), lhs | (1u64 << shamt));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Bext => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+                self.set_x(hart_id, inst.get_r0(), (lhs >> (rhs & 0x3f)) & 1);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Bexti => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let shamt = self.get_resolved_u64(hart_id, inst) & 0x3f;
+                self.set_x(hart_id, inst.get_r0(), (lhs >> shamt) & 1);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Binv => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+                self.set_x(hart_id, inst.get_r0(), lhs ^ (1u64 << (rhs & 0x3f)));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Binvi => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let shamt = self.get_resolved_u64(hart_id, inst) & 0x3f;
+                self.set_x(hart_id, inst.get_r0(), lhs ^ (1u64 << shamt));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Min => {
+                let lhs = self.get_x(hart_id, inst.get_r1()) as i64;
+                let rhs = self.get_x(hart_id, inst.get_r2()) as i64;
+                self.set_x(hart_id, inst.get_r0(), lhs.min(rhs) as u64);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Minu => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+                self.set_x(hart_id, inst.get_r0(), lhs.min(rhs));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Max => {
+                let lhs = self.get_x(hart_id, inst.get_r1()) as i64;
+                let rhs = self.get_x(hart_id, inst.get_r2()) as i64;
+                self.set_x(hart_id, inst.get_r0(), lhs.max(rhs) as u64);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Maxu => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+                self.set_x(hart_id, inst.get_r0(), lhs.max(rhs));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Clzw => {
+                let val = self.get_x(hart_id, inst.get_r1()) as u32;
+                self.set_x(hart_id, inst.get_r0(), (val.leading_zeros() as i32 as i64) as u64);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Ctzw => {
+                let val = self.get_x(hart_id, inst.get_r1()) as u32;
+                self.set_x(hart_id, inst.get_r0(), (val.trailing_zeros() as i32 as i64) as u64);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Cpopw => {
+                let val = self.get_x(hart_id, inst.get_r1()) as u32;
+                self.set_x(hart_id, inst.get_r0(), (val.count_ones() as i32 as i64) as u64);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Rolw => {
+                let lhs = self.get_x(hart_id, inst.get_r1()) as u32;
+                let rhs = self.get_x(hart_id, inst.get_r2());
+                let shamt = (rhs & 0x1f) as u32;
+                self.set_x(hart_id, inst.get_r0(), (lhs.rotate_left(shamt) as i32 as i64) as u64);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Rorw => {
+                let lhs = self.get_x(hart_id, inst.get_r1()) as u32;
+                let rhs = self.get_x(hart_id, inst.get_r2());
+                let shamt = (rhs & 0x1f) as u32;
+                self.set_x(hart_id, inst.get_r0(), (lhs.rotate_right(shamt) as i32 as i64) as u64);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Roriw => {
+                let lhs = self.get_x(hart_id, inst.get_r1()) as u32;
+                let shamt = (self.get_resolved_u64(hart_id, inst) & 0x1f) as u32;
+                self.set_x(hart_id, inst.get_r0(), (lhs.rotate_right(shamt) as i32 as i64) as u64);
+                self.next_pc(hart_id)?;
+            }
             OpCode::Slt => {
                 let lhs = self.get_x(hart_id, inst.get_r1()) as i64;
                 let rhs = self.get_x(hart_id, inst.get_r2()) as i64;
@@ -367,6 +559,310 @@ impl Machine {
                     hart_id,
                     inst.get_r0(),
                     lhs.wrapping_mul(rhs),
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Mulh => {
+                let lhs = self.get_x(hart_id, inst.get_r1()) as i64 as i128;
+                let rhs = self.get_x(hart_id, inst.get_r2()) as i64 as i128;
+                let result = (lhs.wrapping_mul(rhs) >> 64) as u64;
+
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Mulhsu => {
+                let lhs = self.get_x(hart_id, inst.get_r1()) as i64 as i128;
+                let rhs = self.get_x(hart_id, inst.get_r2()) as i128;
+                let result = (lhs.wrapping_mul(rhs) >> 64) as u64;
+
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Mulhu => {
+                let lhs = self.get_x(hart_id, inst.get_r1()) as u128;
+                let rhs = self.get_x(hart_id, inst.get_r2()) as u128;
+                let result = (lhs.wrapping_mul(rhs) >> 64) as u64;
+
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Div => {
+                let lhs = self.get_x(hart_id, inst.get_r1()) as i64;
+                let rhs = self.get_x(hart_id, inst.get_r2()) as i64;
+
+                let result = if rhs == 0 {
+                    u64::MAX
+                } else if lhs == i64::MIN && rhs == -1 {
+                    lhs as u64
+                } else {
+                    lhs.wrapping_div(rhs) as u64
+                };
+
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Divu => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+
+                let result = if rhs == 0 {
+                    u64::MAX
+                } else {
+                    lhs.wrapping_div(rhs)
+                };
+
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Rem => {
+                let lhs = self.get_x(hart_id, inst.get_r1()) as i64;
+                let rhs = self.get_x(hart_id, inst.get_r2()) as i64;
+
+                let result = if rhs == 0 {
+                    lhs as u64
+                } else if lhs == i64::MIN && rhs == -1 {
+                    0u64
+                } else {
+                    lhs.wrapping_rem(rhs) as u64
+                };
+
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Remu => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+
+                let result = if rhs == 0 {
+                    lhs
+                } else {
+                    lhs.wrapping_rem(rhs)
+                };
+
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Mulw => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+
+                let result = (lhs.wrapping_mul(rhs) as i32 as i64) as u64;
+
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Divw => {
+                let lhs = self.get_x(hart_id, inst.get_r1()) as i32;
+                let rhs = self.get_x(hart_id, inst.get_r2()) as i32;
+
+                let result = if rhs == 0 {
+                    u64::MAX
+                } else if lhs == i32::MIN && rhs == -1 {
+                    lhs as u64
+                } else {
+                    lhs.wrapping_div(rhs) as i32 as i64 as u64
+                };
+
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Divuw => {
+                let lhs = self.get_x(hart_id, inst.get_r1()) as u32;
+                let rhs = self.get_x(hart_id, inst.get_r2()) as u32;
+
+                let result = if rhs == 0 {
+                    u64::MAX
+                } else {
+                    (lhs.wrapping_div(rhs) as i32 as i64) as u64
+                };
+
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Remw => {
+                let lhs = self.get_x(hart_id, inst.get_r1()) as i32;
+                let rhs = self.get_x(hart_id, inst.get_r2()) as i32;
+
+                let result = if rhs == 0 {
+                    lhs as u64
+                } else if lhs == i32::MIN && rhs == -1 {
+                    0u64
+                } else {
+                    lhs.wrapping_rem(rhs) as i32 as i64 as u64
+                };
+
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Remuw => {
+                let lhs = self.get_x(hart_id, inst.get_r1()) as u32;
+                let rhs = self.get_x(hart_id, inst.get_r2()) as u32;
+
+                let result = if rhs == 0 {
+                    lhs as u64
+                } else {
+                    (lhs.wrapping_rem(rhs) as i32 as i64) as u64
+                };
+
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Sh1add => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+                self.set_x(hart_id, inst.get_r0(), (lhs << 1).wrapping_add(rhs));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Sh2add => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+                self.set_x(hart_id, inst.get_r0(), (lhs << 2).wrapping_add(rhs));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Sh3add => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+                self.set_x(hart_id, inst.get_r0(), (lhs << 3).wrapping_add(rhs));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Slliuw => {
+                let lhs = self.get_x(hart_id, inst.get_r1()) as u32;
+                let shamt = self.get_resolved_u64(hart_id, inst) & 0x3f;
+                self.set_x(hart_id, inst.get_r0(), (lhs as u64) << shamt);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Adduw => {
+                let lhs = self.get_x(hart_id, inst.get_r1()) as u32 as u64;
+                let rhs = self.get_x(hart_id, inst.get_r2());
+                self.set_x(hart_id, inst.get_r0(), lhs.wrapping_add(rhs));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Sh1adduw => {
+                let lhs = self.get_x(hart_id, inst.get_r1()) as u32 as u64;
+                let rhs = self.get_x(hart_id, inst.get_r2());
+                self.set_x(hart_id, inst.get_r0(), (lhs << 1).wrapping_add(rhs));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Sh2adduw => {
+                let lhs = self.get_x(hart_id, inst.get_r1()) as u32 as u64;
+                let rhs = self.get_x(hart_id, inst.get_r2());
+                self.set_x(hart_id, inst.get_r0(), (lhs << 2).wrapping_add(rhs));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Sh3adduw => {
+                let lhs = self.get_x(hart_id, inst.get_r1()) as u32 as u64;
+                let rhs = self.get_x(hart_id, inst.get_r2());
+                self.set_x(hart_id, inst.get_r0(), (lhs << 3).wrapping_add(rhs));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Clmul => {
+                let mut result: u64 = 0;
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+                for i in 0..64 {
+                    if (rhs >> i) & 1 != 0 {
+                        result ^= lhs << i;
+                    }
+                }
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Clmulr => {
+                let mut result: u64 = 0;
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+                for i in 0..64 {
+                    if (rhs >> i) & 1 != 0 {
+                        result ^= lhs >> (63 - i);
+                    }
+                }
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Clmulh => {
+                let mut result: u64 = 0;
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+                for i in 1..64 {
+                    if (rhs >> i) & 1 != 0 {
+                        result ^= lhs >> (64 - i);
+                    }
+                }
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Czeroeqz => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+                self.set_x(hart_id, inst.get_r0(), if rhs == 0 { 0 } else { lhs });
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Czeronez => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+                self.set_x(hart_id, inst.get_r0(), if rhs != 0 { 0 } else { lhs });
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Addw => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    (lhs.wrapping_add(rhs) as i32 as i64) as u64,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Subw => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    (lhs.wrapping_sub(rhs) as i32 as i64) as u64,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Sllw => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+
+                let shamt = (rhs & 0x1f) as u32;
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    ((lhs as i32) << shamt) as i32 as i64 as u64,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Srlw => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let rhs = self.get_x(hart_id, inst.get_r2());
+
+                let shamt = (rhs & 0x1f) as u32;
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    ((lhs as u32) >> shamt) as u64,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Sraw => {
+                let lhs = self.get_x(hart_id, inst.get_r1()) as i64;
+                let rhs = self.get_x(hart_id, inst.get_r2());
+
+                let shamt = (rhs & 0x1f) as u32;
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    ((lhs as i32) >> shamt) as i32 as i64 as u64,
                 );
 
                 self.next_pc(hart_id)?;
@@ -476,6 +972,54 @@ impl Machine {
                     hart_id,
                     inst.get_r0(),
                     (lhs >> shamt) as u64,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Addiw => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_resolved_i64(hart_id, inst);
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    (lhs.wrapping_add_signed(imm) as i32 as i64) as u64,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Slliw => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let shamt = (self.get_resolved_u64(hart_id, inst) & 0x1f) as u32;
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    ((lhs as i32) << shamt) as i32 as i64 as u64,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Srliw => {
+                let lhs = self.get_x(hart_id, inst.get_r1());
+                let shamt = (self.get_resolved_u64(hart_id, inst) & 0x1f) as u32;
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    ((lhs as u32) >> shamt) as u64,
+                );
+
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Sraiw => {
+                let lhs = self.get_x(hart_id, inst.get_r1()) as i64;
+                let shamt = (self.get_resolved_u64(hart_id, inst) & 0x1f) as u32;
+
+                self.set_x(
+                    hart_id,
+                    inst.get_r0(),
+                    ((lhs as i32) >> shamt) as i32 as i64 as u64,
                 );
 
                 self.next_pc(hart_id)?;
@@ -850,6 +1394,218 @@ impl Machine {
                     lhs / rhs,
                 );
 
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fsqrts => {
+                let val = self.get_f32(hart_id, inst.get_r1());
+                self.set_f32(hart_id, inst.get_r0(), val.sqrt());
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fsqrtd => {
+                let val = self.get_f(hart_id, inst.get_r1());
+                self.set_f(hart_id, inst.get_r0(), val.sqrt());
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fsgnjs => {
+                let lhs = self.get_f32(hart_id, inst.get_r1());
+                let rhs = self.get_f32(hart_id, inst.get_r2());
+                let result = f32::from_bits((lhs.to_bits() & !(1u32 << 31)) | (rhs.to_bits() & (1u32 << 31)));
+                self.set_f32(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fsgnjns => {
+                let lhs = self.get_f32(hart_id, inst.get_r1());
+                let rhs = self.get_f32(hart_id, inst.get_r2());
+                let result = f32::from_bits((lhs.to_bits() & !(1u32 << 31)) | (!rhs.to_bits() & (1u32 << 31)));
+                self.set_f32(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fsgnjxs => {
+                let lhs = self.get_f32(hart_id, inst.get_r1());
+                let rhs = self.get_f32(hart_id, inst.get_r2());
+                let result = f32::from_bits(lhs.to_bits() ^ (rhs.to_bits() & (1u32 << 31)));
+                self.set_f32(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fsgnjd => {
+                let lhs = self.get_f(hart_id, inst.get_r1());
+                let rhs = self.get_f(hart_id, inst.get_r2());
+                let result = f64::from_bits((lhs.to_bits() & !(1u64 << 63)) | (rhs.to_bits() & (1u64 << 63)));
+                self.set_f(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fsgnjnd => {
+                let lhs = self.get_f(hart_id, inst.get_r1());
+                let rhs = self.get_f(hart_id, inst.get_r2());
+                let result = f64::from_bits((lhs.to_bits() & !(1u64 << 63)) | (!rhs.to_bits() & (1u64 << 63)));
+                self.set_f(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fsgnjxd => {
+                let lhs = self.get_f(hart_id, inst.get_r1());
+                let rhs = self.get_f(hart_id, inst.get_r2());
+                let result = f64::from_bits(lhs.to_bits() ^ (rhs.to_bits() & (1u64 << 63)));
+                self.set_f(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fmins => {
+                let lhs = self.get_f32(hart_id, inst.get_r1());
+                let rhs = self.get_f32(hart_id, inst.get_r2());
+                self.set_f32(hart_id, inst.get_r0(), lhs.min(rhs));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fmaxs => {
+                let lhs = self.get_f32(hart_id, inst.get_r1());
+                let rhs = self.get_f32(hart_id, inst.get_r2());
+                self.set_f32(hart_id, inst.get_r0(), lhs.max(rhs));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fmind => {
+                let lhs = self.get_f(hart_id, inst.get_r1());
+                let rhs = self.get_f(hart_id, inst.get_r2());
+                self.set_f(hart_id, inst.get_r0(), lhs.min(rhs));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fmaxd => {
+                let lhs = self.get_f(hart_id, inst.get_r1());
+                let rhs = self.get_f(hart_id, inst.get_r2());
+                self.set_f(hart_id, inst.get_r0(), lhs.max(rhs));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fcvtsd => {
+                let val = self.get_f32(hart_id, inst.get_r1()) as f64;
+                self.set_f(hart_id, inst.get_r0(), val);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fcvtds => {
+                let val = self.get_f(hart_id, inst.get_r1()) as f32;
+                self.set_f32(hart_id, inst.get_r0(), val);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fcvtws => {
+                let val = self.get_f32(hart_id, inst.get_r1()) as i32 as i64 as u64;
+                self.set_x(hart_id, inst.get_r0(), val);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fcvtwus => {
+                let val = self.get_f32(hart_id, inst.get_r1());
+                let result = (val as u32) as u64;
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fcvtwd => {
+                let val = self.get_f(hart_id, inst.get_r1()) as i32 as i64 as u64;
+                self.set_x(hart_id, inst.get_r0(), val);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fcvtwud => {
+                let val = self.get_f(hart_id, inst.get_r1());
+                let result = (val as u32) as u64;
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fcvtsw => {
+                let val = self.get_x(hart_id, inst.get_r1()) as i32 as f32;
+                self.set_f32(hart_id, inst.get_r0(), val);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fcvtswu => {
+                let val = self.get_x(hart_id, inst.get_r1()) as u32 as f32;
+                self.set_f32(hart_id, inst.get_r0(), val);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fcvtdw => {
+                let val = self.get_x(hart_id, inst.get_r1()) as i32 as f64;
+                self.set_f(hart_id, inst.get_r0(), val);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fcvtdwu => {
+                let val = self.get_x(hart_id, inst.get_r1()) as u32 as f64;
+                self.set_f(hart_id, inst.get_r0(), val);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fcvtls => {
+                let val = self.get_f32(hart_id, inst.get_r1()) as i64 as u64;
+                self.set_x(hart_id, inst.get_r0(), val);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fcvtlus => {
+                let val = self.get_f32(hart_id, inst.get_r1()) as u64;
+                self.set_x(hart_id, inst.get_r0(), val);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fcvtld => {
+                let val = self.get_f(hart_id, inst.get_r1()) as i64 as u64;
+                self.set_x(hart_id, inst.get_r0(), val);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fcvtlud => {
+                let val = self.get_f(hart_id, inst.get_r1()) as u64;
+                self.set_x(hart_id, inst.get_r0(), val);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fcvtsl => {
+                let val = self.get_x(hart_id, inst.get_r1()) as i64 as f32;
+                self.set_f32(hart_id, inst.get_r0(), val);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fcvtslu => {
+                let val = self.get_x(hart_id, inst.get_r1()) as f32;
+                self.set_f32(hart_id, inst.get_r0(), val);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fcvtdl => {
+                let val = self.get_x(hart_id, inst.get_r1()) as i64 as f64;
+                self.set_f(hart_id, inst.get_r0(), val);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fcvtdlu => {
+                let val = self.get_x(hart_id, inst.get_r1()) as f64;
+                self.set_f(hart_id, inst.get_r0(), val);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fclasss => {
+                let val = self.get_f32(hart_id, inst.get_r1());
+                let bits = val.to_bits();
+                let result: u64 = if val.is_infinite() {
+                    if bits & (1u32 << 31) != 0 { 1 << 0 } else { 1 << 7 }
+                } else if val.is_nan() {
+                    if bits & (1 << 22) != 0 { 1 << 8 } else { 1 << 9 }
+                } else if val == 0.0 {
+                    if bits & (1u32 << 31) != 0 { 1 << 3 } else { 1 << 4 }
+                } else if val.is_subnormal() {
+                    if bits & (1u32 << 31) != 0 { 1 << 2 } else { 1 << 5 }
+                } else {
+                    if bits & (1u32 << 31) != 0 { 1 << 1 } else { 1 << 6 }
+                };
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fclassd => {
+                let val = self.get_f(hart_id, inst.get_r1());
+                let bits = val.to_bits();
+                let result: u64 = if val.is_infinite() {
+                    if bits & (1u64 << 63) != 0 { 1 << 0 } else { 1 << 7 }
+                } else if val.is_nan() {
+                    if bits & (1u64 << 51) != 0 { 1 << 8 } else { 1 << 9 }
+                } else if val == 0.0 {
+                    if bits & (1u64 << 63) != 0 { 1 << 3 } else { 1 << 4 }
+                } else if val.is_subnormal() {
+                    if bits & (1u64 << 63) != 0 { 1 << 2 } else { 1 << 5 }
+                } else {
+                    if bits & (1u64 << 63) != 0 { 1 << 1 } else { 1 << 6 }
+                };
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fmvxw => {
+                let val = self.get_f32(hart_id, inst.get_r1());
+                self.set_x(hart_id, inst.get_r0(), val.to_bits() as u64);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fmvwx => {
+                let val = self.get_x(hart_id, inst.get_r1()) as u32;
+                self.set_f32(hart_id, inst.get_r0(), f32::from_bits(val));
                 self.next_pc(hart_id)?;
             }
             OpCode::Feqd => {
