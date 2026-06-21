@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 
- dap = { version = "0.4.1-alpha1" }
+dap = { version = "0.4.1-alpha1" }
 
 #log4rs 
 log = "*"

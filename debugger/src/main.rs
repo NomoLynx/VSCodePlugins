@@ -82,8 +82,11 @@ fn get_log_file() -> String {
     fallback.to_string_lossy().to_string()
 }
 
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+
+    // program_path used for stack trace source reference, set during launch request
+    let mut program_path: Option<String> = None; 
+
     let log_file = get_log_file();
     init_debugger_logger(&log_file);
 
@@ -122,6 +125,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Command::Launch(args) => {
                 log::info!("launch: {:?}", args);
 
+                // keep file path for later use in stack trace
+                program_path = args
+                        .additional_data
+                        .as_ref()
+                        .and_then(|v| v["program"].as_str())
+                        .map(|s| s.to_string());
+                log::info!("program path: {:?}", program_path);
+
                 // start the simulator, load the program, etc.
 
                 server.respond(req.success(ResponseBody::Launch))?;
@@ -152,6 +163,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ))?;
             }
             Command::StackTrace(args) => {
+                log::info!("stackTrace: {:?}", args);
+
+                let file_name = program_path
+                                                .as_ref()
+                                                .and_then(|p| std::path::Path::new(p).file_name())
+                                                .and_then(|n| n.to_str())
+                                                .unwrap_or("program.rv.s")
+                                                .to_string();
+                log::info!("stackTrace source file name: {:?}", file_name);
+
                 server.respond(req.success(
                     ResponseBody::StackTrace(StackTraceResponse {
                         stack_frames: vec![
@@ -160,7 +181,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 name: "main".to_string(),
                                 line: 1,
                                 column: 1,
-                                source: None,
+                                source: Some(types::Source {
+                                    name: Some(file_name),
+                                    path: program_path.clone(),
+                                    ..Default::default()
+                                }),
                                 ..Default::default()
                             }
                         ],
