@@ -21,6 +21,11 @@ use log4rs::{
     encode::pattern::PatternEncoder,
 };
 
+use dap::prelude::*;
+use dap::events::*;
+use dap::requests::*;
+use dap::responses::*;
+
 use std::env;
 use std::path::PathBuf;
 
@@ -77,14 +82,103 @@ fn get_log_file() -> String {
     fallback.to_string_lossy().to_string()
 }
 
-fn main() {
-    let log_file = get_log_file();
 
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let log_file = get_log_file();
     init_debugger_logger(&log_file);
 
-    log::info!("debugger starting");
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
 
-    std::thread::sleep(
-        std::time::Duration::from_secs(30)
-    );
+    let reader = std::io::BufReader::new(stdin);
+    let writer = std::io::BufWriter::new(stdout);
+
+    let mut server = Server::new(reader, writer);
+
+    log::info!("debugger started");
+
+    loop {
+        let req = match server.poll_request()? {
+            Some(req) => req,
+            None => break,
+        };
+
+        log::info!("received request: {:?}", req.command);
+
+        match &req.command {
+            Command::Initialize(args) => {
+                log::info!("initialize");
+                let rsp = ResponseBody::Initialize(
+                    types::Capabilities {
+                        supports_configuration_done_request: Some(true),
+                        ..Default::default()
+                    }
+                );
+                server.respond(req.success(rsp))?;
+
+                // 🔥 REQUIRED: tell VS Code debugger is ready
+                server.send_event(Event::Initialized)?;
+            }
+            Command::Launch(args) => {
+                log::info!("launch: {:?}", args);
+
+                // start the simulator, load the program, etc.
+
+                server.respond(req.success(ResponseBody::Launch))?;
+
+                // 🔥 REQUIRED: simulate "program paused"
+                server.send_event(Event::Stopped( 
+                        StoppedEventBody {
+                        reason: types::StoppedEventReason::Entry,
+                        description: Some("entry".into()),
+                        thread_id: Some(1),
+                        preserve_focus_hint: Some(true),
+                        text: None,
+                        all_threads_stopped: Some(true),
+                        hit_breakpoint_ids: Some(vec![]),
+                    } 
+                ))?;
+            }
+            Command::Threads => {
+                server.respond(req.success(
+                    ResponseBody::Threads(ThreadsResponse {
+                        threads: vec![
+                            types::Thread {
+                                id: 1,
+                                name: "hart0".to_string(),
+                            }
+                        ]
+                    })
+                ))?;
+            }
+            Command::StackTrace(args) => {
+                server.respond(req.success(
+                    ResponseBody::StackTrace(StackTraceResponse {
+                        stack_frames: vec![
+                            types::StackFrame {
+                                id: 1,
+                                name: "main".to_string(),
+                                line: 1,
+                                column: 1,
+                                source: None,
+                                ..Default::default()
+                            }
+                        ],
+                        total_frames: Some(1),
+                    })
+                ))?;
+            }
+            Command::Disconnect(_) => {
+                log::info!("disconnect");
+                server.respond(req.success(ResponseBody::Disconnect))?;
+                break;
+            }
+            other => {
+                log::info!("unhandled request: {:?}", other);
+                server.respond(req.success(ResponseBody::Terminate))?;
+            }
+        }
+    }
+
+    Ok(())
 }
