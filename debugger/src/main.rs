@@ -29,6 +29,16 @@ use dap::responses::*;
 use std::env;
 use std::path::PathBuf;
 
+fn to_file_uri(path: &str) -> String {
+    let p = std::path::Path::new(path)
+        .canonicalize()
+        .unwrap_or_else(|_| std::path::PathBuf::from(path));
+
+    let p = p.to_string_lossy().replace("\\", "/");
+
+    format!("file:///{}", p)
+}
+
 fn init_debugger_logger(log_file: &str) {
     let logfile = FileAppender::builder()
         .encoder(Box::new(
@@ -136,19 +146,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // start the simulator, load the program, etc.
 
                 server.respond(req.success(ResponseBody::Launch))?;
-
-                // 🔥 REQUIRED: simulate "program paused"
-                server.send_event(Event::Stopped( 
-                        StoppedEventBody {
-                        reason: types::StoppedEventReason::Entry,
-                        description: Some("entry".into()),
-                        thread_id: Some(1),
-                        preserve_focus_hint: Some(true),
-                        text: None,
-                        all_threads_stopped: Some(true),
-                        hit_breakpoint_ids: Some(vec![]),
-                    } 
-                ))?;
             }
             Command::Threads => {
                 server.respond(req.success(
@@ -171,7 +168,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 .and_then(|n| n.to_str())
                                                 .unwrap_or("program.rv.s")
                                                 .to_string();
-                log::info!("stackTrace source file name: {:?}", file_name);
+                let file_path = to_file_uri(program_path.as_ref().unwrap_or(&"".to_string()));
+                log::info!("stackTrace: {file_name:?} and file_path = {file_path}");
+
+                log::info!("stack frame path = {:?}", program_path);
+                log::info!("exists = {}", std::path::Path::new(program_path.as_ref().unwrap()).exists());
 
                 server.respond(req.success(
                     ResponseBody::StackTrace(StackTraceResponse {
@@ -198,8 +199,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 server.respond(req.success(ResponseBody::Disconnect))?;
                 break;
             }
+            Command::ConfigurationDone => {
+                log::info!("configurationDone");
+
+                server.respond(req.success(ResponseBody::ConfigurationDone))?;
+
+                server.send_event(Event::Stopped(
+                    StoppedEventBody {
+                        reason: types::StoppedEventReason::Entry,
+                        description: Some("entry".into()),
+                        thread_id: Some(1),
+                        preserve_focus_hint: Some(true),
+                        text: None,
+                        all_threads_stopped: Some(true),
+                        hit_breakpoint_ids: Some(vec![]),
+                    }
+                ))?;
+            }
             other => {
-                log::info!("unhandled request: {:?}", other);
+                log::error!("Unhandled request: {:?}", other);
                 server.respond(req.success(ResponseBody::Terminate))?;
             }
         }
