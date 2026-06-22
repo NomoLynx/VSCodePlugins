@@ -29,16 +29,6 @@ use dap::responses::*;
 use std::env;
 use std::path::PathBuf;
 
-fn to_file_uri(path: &str) -> String {
-    let p = std::path::Path::new(path)
-        .canonicalize()
-        .unwrap_or_else(|_| std::path::PathBuf::from(path));
-
-    let p = p.to_string_lossy().replace("\\", "/");
-
-    format!("file:///{}", p)
-}
-
 fn init_debugger_logger(log_file: &str) {
     let logfile = FileAppender::builder()
         .encoder(Box::new(
@@ -168,8 +158,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 .and_then(|n| n.to_str())
                                                 .unwrap_or("program.rv.s")
                                                 .to_string();
-                let file_path = to_file_uri(program_path.as_ref().unwrap_or(&"".to_string()));
-                log::info!("stackTrace: {file_name:?} and file_path = {file_path}");
+                log::info!("stackTrace: file_name = {file_name:?}");
 
                 log::info!("stack frame path = {:?}", program_path);
                 log::info!("exists = {}", std::path::Path::new(program_path.as_ref().unwrap()).exists());
