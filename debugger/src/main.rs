@@ -180,7 +180,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             types::StackFrame {
                                 id: 1,
                                 name: "main".to_string(),
-                                line: 1,
+                                line: 1,        // for simplicity, we use line 1. In a real implementation, this should reflect the actual line number in the source code.
                                 column: 1,
                                 source: Some(types::Source {
                                     name: Some(file_name),
@@ -193,6 +193,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         total_frames: Some(1),
                     })
                 ))?;
+            }
+            Command::Next(args) => {
+                log::info!("STEP OVER");
+
+                log::info!("Todo: step over the simulator");
+
+                // 3. respond to VS Code request
+                server.respond(req.success(ResponseBody::Next))?;
+
+                // 4. notify VS Code UI
+                server.send_event(Event::Stopped(StoppedEventBody {
+                    reason: types::StoppedEventReason::Step,
+                    description: Some("step next".into()),
+                    thread_id: Some(1),
+                    preserve_focus_hint: Some(true),
+                    text: None,
+                    all_threads_stopped: Some(true),
+                    hit_breakpoint_ids: Some(vec![]),
+                }))?;
             }
             Command::Disconnect(_) => {
                 log::info!("disconnect");
