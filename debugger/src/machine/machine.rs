@@ -6,10 +6,183 @@ use riscv_asm_lib::r5asm::opcode::OpCode;
 use riscv_asm_lib::r5asm::register::Register;
 
 use crate::debugger_error::DebuggerError;
-use crate::machine::hart::{Hart, PC_INCREMENT};
+use crate::machine::hart::{Hart, PC_INCREMENT, PrivilegeLevel, EXCEPTION_ENVIRONMENT_CALL_FROM_U, EXCEPTION_ENVIRONMENT_CALL_FROM_S, EXCEPTION_ENVIRONMENT_CALL_FROM_M, EXCEPTION_BREAKPOINT};
 use crate::machine::processor::Processor;
 use crate::machine::register_ref::{RegisterRef, RegisterType};
 use crate::memory::memory::Memory;
+
+// ============================================================
+// AES S-Box and helper tables for RISC-V krypto instructions
+// ============================================================
+
+/// AES forward S-Box (SubBytes step)
+const AES_SBOX: [u8; 256] = [
+    0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
+    0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
+    0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71, 0xd8, 0x31, 0x15,
+    0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07, 0x12, 0x80, 0xe2, 0xeb, 0x27, 0xb2, 0x75,
+    0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0, 0x52, 0x3b, 0xd6, 0xb3, 0x29, 0xe3, 0x2f, 0x84,
+    0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb, 0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf,
+    0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45, 0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8,
+    0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5, 0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2,
+    0xcd, 0x0c, 0x13, 0xec, 0x5f, 0x97, 0x44, 0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73,
+    0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a, 0x90, 0x88, 0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb,
+    0xe0, 0x32, 0x3a, 0x0a, 0x49, 0x06, 0x24, 0x5c, 0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79,
+    0xe7, 0xc8, 0x37, 0x6d, 0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08,
+    0xba, 0x78, 0x25, 0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a,
+    0x70, 0x3e, 0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e, 0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e,
+    0xe1, 0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
+    0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16,
+];
+
+/// AES inverse S-Box (InvSubBytes step)
+const AES_INV_SBOX: [u8; 256] = [
+    0x52, 0x09, 0x6a, 0xd5, 0x30, 0x36, 0xa5, 0x38, 0xbf, 0x40, 0xa3, 0x9e, 0x81, 0xf3, 0xd7, 0xfb,
+    0x7c, 0xe3, 0x39, 0x82, 0x9b, 0x2f, 0xff, 0x87, 0x34, 0x8e, 0x43, 0x44, 0xc4, 0xde, 0xe9, 0xcb,
+    0x54, 0x7b, 0x94, 0x32, 0xa6, 0xc2, 0x23, 0x3d, 0xee, 0x4c, 0x95, 0x0b, 0x42, 0xfa, 0xc3, 0x4e,
+    0x08, 0x2e, 0xa1, 0x66, 0x28, 0xd9, 0x24, 0xb2, 0x76, 0x5b, 0xa2, 0x49, 0x6d, 0x8b, 0xd1, 0x25,
+    0x72, 0xf8, 0xf6, 0x64, 0x86, 0x68, 0x98, 0x16, 0xd4, 0xa4, 0x5c, 0xcc, 0x5d, 0x65, 0xb6, 0x92,
+    0x6c, 0x70, 0x48, 0x50, 0xfd, 0xed, 0xb9, 0xda, 0x5e, 0x15, 0x46, 0x57, 0xa7, 0x8d, 0x9d, 0x84,
+    0x90, 0xd8, 0xab, 0x00, 0x8c, 0xbc, 0xd3, 0x0a, 0xf7, 0xe4, 0x58, 0x05, 0xb8, 0xb3, 0x45, 0x06,
+    0xd0, 0x2c, 0x1e, 0x8f, 0xca, 0x3f, 0x0f, 0x02, 0xc1, 0xaf, 0xbd, 0x03, 0x01, 0x13, 0x8a, 0x6b,
+    0x3a, 0x91, 0x11, 0x41, 0x4f, 0x67, 0xdc, 0xea, 0x97, 0xf2, 0xcf, 0xce, 0xf0, 0xb4, 0xe6, 0x73,
+    0x96, 0xac, 0x74, 0x22, 0xe7, 0xad, 0x35, 0x85, 0xe2, 0xf9, 0x37, 0xe8, 0x1c, 0x75, 0xdf, 0x6e,
+    0x47, 0xf1, 0x1a, 0x71, 0x1d, 0x29, 0xc5, 0x89, 0x6f, 0xb7, 0x62, 0x0e, 0xaa, 0x18, 0xbe, 0x1b,
+    0xfc, 0x56, 0x3e, 0x4b, 0xc6, 0xd2, 0x79, 0x20, 0x9a, 0xdb, 0xc0, 0xfe, 0x78, 0xcd, 0x5a, 0xf4,
+    0x1f, 0xdd, 0xa8, 0x33, 0x88, 0x07, 0xc7, 0x31, 0xb1, 0x12, 0x10, 0x59, 0x27, 0x80, 0xec, 0x5f,
+    0x60, 0x51, 0x7f, 0xa9, 0x19, 0xb5, 0x4a, 0x0d, 0x2d, 0xe5, 0x7a, 0x9f, 0x93, 0xc9, 0x9c, 0xef,
+    0xa0, 0xe0, 0x3b, 0x4d, 0xae, 0x2a, 0xf5, 0xb0, 0xc8, 0xeb, 0xbb, 0x3c, 0x83, 0x53, 0x99, 0x61,
+    0x17, 0x2b, 0x04, 0x7e, 0xba, 0x77, 0xd6, 0x26, 0xe1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0c, 0x7d,
+];
+
+/// AES key schedule round constants (RCON)
+const AES_RCON: [u8; 11] = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36, 0x00];
+
+/// Apply the AES forward S-Box to each byte of a 64-bit value (SubBytes step)
+fn aes64_sub_bytes(value: u64) -> u64 {
+    let mut result: u64 = 0;
+    for i in 0..8 {
+        let byte = ((value >> (i * 8)) & 0xFF) as u8;
+        let subbed = AES_SBOX[byte as usize] as u64;
+        result |= subbed << (i * 8);
+    }
+    result
+}
+
+/// Apply the AES inverse S-Box to each byte of a 64-bit value (InvSubBytes step)
+fn aes64_inv_sub_bytes(value: u64) -> u64 {
+    let mut result: u64 = 0;
+    for i in 0..8 {
+        let byte = ((value >> (i * 8)) & 0xFF) as u8;
+        let subbed = AES_INV_SBOX[byte as usize] as u64;
+        result |= subbed << (i * 8);
+    }
+    result
+}
+
+/// Galois Field multiplication by {02} in GF(2^8) with polynomial x^8 + x^4 + x^3 + x + 1
+fn gf_mul2(b: u8) -> u8 {
+    let r = (b as u16) << 1;
+    if (b & 0x80) != 0 {
+        (r ^ 0x11b) as u8
+    } else {
+        r as u8
+    }
+}
+
+/// Galois Field multiplication in GF(2^8) with polynomial x^8 + x^4 + x^3 + x + 1
+fn gf_mul(a: u8, b: u8) -> u8 {
+    let mut p: u8 = 0;
+    let mut a_mut = a;
+    let mut b_mut = b;
+    for _ in 0..8 {
+        if (b_mut & 1) != 0 {
+            p ^= a_mut;
+        }
+        let hi_bit_set = (a_mut & 0x80) != 0;
+        a_mut <<= 1;
+        if hi_bit_set {
+            a_mut ^= 0x1b;
+        }
+        b_mut >>= 1;
+    }
+    p
+}
+
+/// Apply MixColumns to a single 32-bit column (4 bytes as u32, little-endian)
+/// AES MixColumns: each output byte = {02}*b0 + {03}*b1 + {01}*b2 + {01}*b3 (rotated)
+fn mix_column(col: u32) -> u32 {
+    let b0 = (col & 0xFF) as u8;
+    let b1 = ((col >> 8) & 0xFF) as u8;
+    let b2 = ((col >> 16) & 0xFF) as u8;
+    let b3 = ((col >> 24) & 0xFF) as u8;
+
+    let r0 = gf_mul2(b0) ^ gf_mul(0x03, b1) ^ b2 ^ b3;
+    let r1 = b0 ^ gf_mul2(b1) ^ gf_mul(0x03, b2) ^ b3;
+    let r2 = b0 ^ b1 ^ gf_mul2(b2) ^ gf_mul(0x03, b3);
+    let r3 = gf_mul(0x03, b0) ^ b1 ^ b2 ^ gf_mul2(b3);
+
+    (r0 as u32) | ((r1 as u32) << 8) | ((r2 as u32) << 16) | ((r3 as u32) << 24)
+}
+
+/// Apply InvMixColumns to a single 32-bit column (4 bytes as u32, little-endian)
+/// AES InvMixColumns: each output byte = {0e}*b0 + {0b}*b1 + {0d}*b2 + {09}*b3 (rotated)
+fn inv_mix_column(col: u32) -> u32 {
+    let b0 = (col & 0xFF) as u8;
+    let b1 = ((col >> 8) & 0xFF) as u8;
+    let b2 = ((col >> 16) & 0xFF) as u8;
+    let b3 = ((col >> 24) & 0xFF) as u8;
+
+    let r0 = gf_mul(0x0e, b0) ^ gf_mul(0x0b, b1) ^ gf_mul(0x0d, b2) ^ gf_mul(0x09, b3);
+    let r1 = gf_mul(0x09, b0) ^ gf_mul(0x0e, b1) ^ gf_mul(0x0b, b2) ^ gf_mul(0x0d, b3);
+    let r2 = gf_mul(0x0d, b0) ^ gf_mul(0x09, b1) ^ gf_mul(0x0e, b2) ^ gf_mul(0x0b, b3);
+    let r3 = gf_mul(0x0b, b0) ^ gf_mul(0x0d, b1) ^ gf_mul(0x09, b2) ^ gf_mul(0x0e, b3);
+
+    (r0 as u32) | ((r1 as u32) << 8) | ((r2 as u32) << 16) | ((r3 as u32) << 24)
+}
+
+/// AES MixColumns on 64-bit value: treats as two independent 32-bit columns
+fn aes64_mix_columns(value: u64) -> u64 {
+    let lo = mix_column((value & 0xFFFF_FFFF) as u32);
+    let hi = mix_column(((value >> 32) & 0xFFFF_FFFF) as u32);
+    (lo as u64) | ((hi as u64) << 32)
+}
+
+/// AES InvMixColumns on 64-bit value: treats as two independent 32-bit columns
+fn aes64_inv_mix_columns(value: u64) -> u64 {
+    let lo = inv_mix_column((value & 0xFFFF_FFFF) as u32);
+    let hi = inv_mix_column(((value >> 32) & 0xFFFF_FFFF) as u32);
+    (lo as u64) | ((hi as u64) << 32)
+}
+
+/// AES Key Schedule step 1 (round constant): takes rs1 as {w1, w0} (two 32-bit words),
+/// rotates w1 left 32 bits, applies SubBytes, XORs rcon into top byte,
+/// returns the new w1 in low 32 bits, sign-extended to 64 bits.
+fn aes64_ks1i(rs1: u64, rcon: u32) -> u64 {
+    // Extract w1 (high 32 bits of rs1)
+    let w1: u32 = (rs1 >> 32) as u32;
+    // Rotate w1 right by 8 bits (equivalent to left rotate by 24 in 32-bit)
+    // Actually per spec: w1 = RotateWord(w1) = w1.rotate_left(8) or w1.rotate_right(24)
+    // But actually, aes64ks1i does: w1 = SubWord(RotWord(w1)) ^ rcon
+    // RotWord: byte rotation left by 8 bits within 32-bit word
+    let rotated = w1.rotate_left(8);
+    // SubBytes on each byte of rotated w1
+    let mut subbed: u32 = 0;
+    for i in 0..4 {
+        let byte = ((rotated >> (i * 8)) & 0xFF) as u8;
+        subbed |= (AES_SBOX[byte as usize] as u32) << (i * 8);
+    }
+    // XOR rcon into top byte (byte 3)
+    let rcon_masked = (rcon & 0xFF) as u32;
+    subbed ^= rcon_masked << 24;
+    // Return result sign-extended from 32 bits
+    subbed as i32 as i64 as u64
+}
+
+/// AES Key Schedule step 2: XOR two 64-bit values
+fn aes64_ks2(rs1: u64, rs2: u64) -> u64 {
+    rs1 ^ rs2
+}
 
 pub type ProcessorId = usize;
 pub type HartId = u64;
@@ -143,7 +316,7 @@ impl Machine {
         let item = program
             .get_text_section_items()
             .into_iter()
-            .find(|x| x.get_offset() == hart.pc)
+            .find(|x| x.get_offset() == hart.pc && x.is_inc())
             .and_then(|x| x.get_inc());
         item
     }
@@ -163,7 +336,6 @@ impl Machine {
     fn get_inst_target(&self, hart_id: HartId) -> Option<usize> {
         let hart = self.get_hart(hart_id)?;
         let inst = self.fetch_inst(hart)?;
-
         Some(inst.get_virtual_address() as usize)
     }
 
@@ -1718,6 +1890,693 @@ impl Machine {
 
                 self.next_pc(hart_id)?;
             }
+            OpCode::Fmadds => {
+                let a = self.get_f32(hart_id, inst.get_r1());
+                let b = self.get_f32(hart_id, inst.get_r2());
+                let c = self.get_f32(hart_id, inst.get_r3());
+                self.set_f32(hart_id, inst.get_r0(), a.mul_add(b, c));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fmsubs => {
+                let a = self.get_f32(hart_id, inst.get_r1());
+                let b = self.get_f32(hart_id, inst.get_r2());
+                let c = self.get_f32(hart_id, inst.get_r3());
+                self.set_f32(hart_id, inst.get_r0(), a.mul_add(b, -c));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fnmsubs => {
+                let a = self.get_f32(hart_id, inst.get_r1());
+                let b = self.get_f32(hart_id, inst.get_r2());
+                let c = self.get_f32(hart_id, inst.get_r3());
+                self.set_f32(hart_id, inst.get_r0(), -(a.mul_add(b, -c)));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fnmadds => {
+                let a = self.get_f32(hart_id, inst.get_r1());
+                let b = self.get_f32(hart_id, inst.get_r2());
+                let c = self.get_f32(hart_id, inst.get_r3());
+                self.set_f32(hart_id, inst.get_r0(), -(a.mul_add(b, c)));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fmaddd => {
+                let a = self.get_f(hart_id, inst.get_r1());
+                let b = self.get_f(hart_id, inst.get_r2());
+                let c = self.get_f(hart_id, inst.get_r3());
+                self.set_f(hart_id, inst.get_r0(), a.mul_add(b, c));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fmsubd => {
+                let a = self.get_f(hart_id, inst.get_r1());
+                let b = self.get_f(hart_id, inst.get_r2());
+                let c = self.get_f(hart_id, inst.get_r3());
+                self.set_f(hart_id, inst.get_r0(), a.mul_add(b, -c));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fnmsubd => {
+                let a = self.get_f(hart_id, inst.get_r1());
+                let b = self.get_f(hart_id, inst.get_r2());
+                let c = self.get_f(hart_id, inst.get_r3());
+                self.set_f(hart_id, inst.get_r0(), -(a.mul_add(b, -c)));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fnmaddd => {
+                let a = self.get_f(hart_id, inst.get_r1());
+                let b = self.get_f(hart_id, inst.get_r2());
+                let c = self.get_f(hart_id, inst.get_r3());
+                self.set_f(hart_id, inst.get_r0(), -(a.mul_add(b, c)));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Flw => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_resolved_i64(hart_id, inst);
+                let addr = base.wrapping_add_signed(imm);
+                let bits = self.memory.read_u32(addr);
+                self.set_f32(hart_id, inst.get_r0(), f32::from_bits(bits));
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Fsw => {
+                let val = self.get_f32(hart_id, inst.get_r0());
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_resolved_i64(hart_id, inst);
+                let addr = base.wrapping_add_signed(imm);
+                self.memory.write_u32(addr, val.to_bits());
+                self.next_pc(hart_id)?;
+            }
+            // ============================================================
+            // Krypto: Zbkb - Pack/Packh/Packw/Brev8/Zip/Unzip
+            // ============================================================
+            OpCode::Pack => {
+                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let rs2 = self.get_x(hart_id, inst.get_r2());
+                let result = (rs1 & 0xFFFFFFFF) | (rs2 << 32);
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Packh => {
+                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let rs2 = self.get_x(hart_id, inst.get_r2());
+                let mut result: u64 = 0;
+                for i in 0..4 {
+                    let rs1_byte = (rs1 >> (i * 8)) & 0xFF;
+                    let rs2_byte = (rs2 >> (i * 8)) & 0xFF;
+                    result |= rs1_byte << (i * 16);
+                    result |= rs2_byte << (i * 16 + 8);
+                }
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Packw => {
+                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let rs2 = self.get_x(hart_id, inst.get_r2());
+                let lo = rs1 & 0xFFFF;
+                let hi = rs2 & 0xFFFF;
+                let result = (lo | (hi << 16)) as i32 as i64 as u64;
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Brev8 => {
+                let val = self.get_x(hart_id, inst.get_r1());
+                let mut result: u64 = 0;
+                for i in 0..8 {
+                    let byte = ((val >> (i * 8)) & 0xFF) as u8;
+                    let rev = byte.reverse_bits();
+                    result |= (rev as u64) << (i * 8);
+                }
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Zip => {
+                let val = self.get_x(hart_id, inst.get_r1());
+                let mut result: u64 = 0;
+                for i in 0..32 {
+                    let low_bit = (val >> i) & 1;
+                    let high_bit = (val >> (i + 32)) & 1;
+                    result |= low_bit << (2 * i);
+                    result |= high_bit << (2 * i + 1);
+                }
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Unzip => {
+                let val = self.get_x(hart_id, inst.get_r1());
+                let mut result: u64 = 0;
+                for i in 0..32 {
+                    let low_bit = (val >> (2 * i)) & 1;
+                    let high_bit = (val >> (2 * i + 1)) & 1;
+                    result |= low_bit << i;
+                    result |= high_bit << (i + 32);
+                }
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            // ============================================================
+            // Krypto: Zbkx - Xperm4/Xperm8
+            // ============================================================
+            OpCode::Xperm4 => {
+                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let rs2 = self.get_x(hart_id, inst.get_r2());
+                let mut result: u64 = 0;
+                for i in 0..16 {
+                    let idx = ((rs1 >> (i * 4)) & 0xF) as usize;
+                    let nibble = (rs2 >> (idx * 4)) & 0xF;
+                    result |= nibble << (i * 4);
+                }
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Xperm8 => {
+                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let rs2 = self.get_x(hart_id, inst.get_r2());
+                let mut result: u64 = 0;
+                for i in 0..8 {
+                    let idx = ((rs1 >> (i * 8)) & 0xFF) as usize;
+                    // Per spec: if idx >= 8, result byte is 0
+                    if idx < 8 {
+                        let byte = (rs2 >> (idx * 8)) & 0xFF;
+                        result |= byte << (i * 8);
+                    }
+                }
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            // ============================================================
+            // Krypto: Zknd/Zkne - AES instructions
+            // ============================================================
+
+            // AES decrypt (final round): InvMixColumns(InvSubBytes(rs1)) ^ rs2
+            OpCode::Aes64ds => {
+                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let rs2 = self.get_x(hart_id, inst.get_r2());
+                let result = aes64_inv_mix_columns(aes64_inv_sub_bytes(rs1)) ^ rs2;
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            // AES decrypt middle round: InvMixColumns(rs1) ^ rs2
+            OpCode::Aes64dsm => {
+                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let rs2 = self.get_x(hart_id, inst.get_r2());
+                let result = aes64_inv_mix_columns(rs1) ^ rs2;
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            // AES encrypt (final round): MixColumns(SubBytes(rs1)) ^ rs2
+            OpCode::Aes64es => {
+                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let rs2 = self.get_x(hart_id, inst.get_r2());
+                let result = aes64_mix_columns(aes64_sub_bytes(rs1)) ^ rs2;
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            // AES encrypt middle round: MixColumns(rs1) ^ rs2
+            OpCode::Aes64esm => {
+                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let rs2 = self.get_x(hart_id, inst.get_r2());
+                let result = aes64_mix_columns(rs1) ^ rs2;
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            // AES intermediate mix columns: InvMixColumns(rs1)
+            OpCode::Aes64im => {
+                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let result = aes64_inv_mix_columns(rs1);
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            // AES key schedule round constant: extract rnum from encoded imm (0x310 | rnum)
+            OpCode::Aes64ks1i => {
+                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let rnum = (self.get_resolved_u64(hart_id, inst) & 0xF) as u32;
+                let result = aes64_ks1i(rs1, rnum);
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            // AES key schedule word XOR
+            OpCode::Aes64ks2 => {
+                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let rs2 = self.get_x(hart_id, inst.get_r2());
+                let result = aes64_ks2(rs1, rs2);
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            // ============================================================
+            // Krypto: Zknh - SHA256 instructions
+            // ============================================================
+            OpCode::Sha256sig0 => {
+                let val = self.get_x(hart_id, inst.get_r1());
+                let result = val.rotate_right(7) ^ val.rotate_right(18) ^ (val >> 3);
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Sha256sig1 => {
+                let val = self.get_x(hart_id, inst.get_r1());
+                let result = val.rotate_right(17) ^ val.rotate_right(19) ^ (val >> 10);
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Sha256sum0 => {
+                let val = self.get_x(hart_id, inst.get_r1());
+                let result = val.rotate_right(2) ^ val.rotate_right(13) ^ val.rotate_right(22);
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Sha256sum1 => {
+                let val = self.get_x(hart_id, inst.get_r1());
+                let result = val.rotate_right(6) ^ val.rotate_right(11) ^ val.rotate_right(25);
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            // ============================================================
+            // Krypto: Zknh - SHA512 instructions
+            // ============================================================
+            OpCode::Sha512sig0 => {
+                let val = self.get_x(hart_id, inst.get_r1());
+                let result = val.rotate_right(1) ^ val.rotate_right(8) ^ (val >> 7);
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Sha512sig1 => {
+                let val = self.get_x(hart_id, inst.get_r1());
+                let result = val.rotate_right(19) ^ val.rotate_right(61) ^ (val >> 6);
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Sha512sum0 => {
+                let val = self.get_x(hart_id, inst.get_r1());
+                let result = val.rotate_right(28) ^ val.rotate_right(34) ^ val.rotate_right(39);
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Sha512sum1 => {
+                let val = self.get_x(hart_id, inst.get_r1());
+                let result = val.rotate_right(14) ^ val.rotate_right(18) ^ val.rotate_right(41);
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            // ============================================================
+            // Krypto: Zksh - SM3 instructions
+            // ============================================================
+            OpCode::Sm3p0 => {
+                let val = self.get_x(hart_id, inst.get_r1());
+                let result = val ^ val.rotate_right(9) ^ val.rotate_right(17);
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            OpCode::Sm3p1 => {
+                let val = self.get_x(hart_id, inst.get_r1());
+                let result = val ^ val.rotate_right(15) ^ val.rotate_right(23);
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc(hart_id)?;
+            }
+            // ============================================================
+            // C Extension - Compressed instructions (2-byte)
+            // ============================================================
+
+            // C.LW: Load word from memory (rs1 + offset)
+            OpCode::Clw => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
+                let addr = base.wrapping_add(imm);
+                let val = self.memory.read_u32(addr) as i32 as i64 as u64;
+                self.set_x(hart_id, inst.get_r0(), val);
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.LWSP: Load word from stack pointer (x2 + offset)
+            OpCode::Clwsp => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
+                let addr = base.wrapping_add(imm);
+                let val = self.memory.read_u32(addr) as i32 as i64 as u64;
+                self.set_x(hart_id, inst.get_r0(), val);
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.LD: Load doubleword from memory
+            OpCode::Cld => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
+                let addr = base.wrapping_add(imm);
+                let val = self.memory.read_u64(addr);
+                self.set_x(hart_id, inst.get_r0(), val);
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.LDSP: Load doubleword from stack pointer
+            OpCode::Cldsp => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
+                let addr = base.wrapping_add(imm);
+                let val = self.memory.read_u64(addr);
+                self.set_x(hart_id, inst.get_r0(), val);
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.LQ: Load quadword (128-bit) - simplified to load lower 64 bits
+            OpCode::Clq => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
+                let addr = base.wrapping_add(imm);
+                let val = self.memory.read_u64(addr);
+                self.set_x(hart_id, inst.get_r0(), val);
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.LQSP: Load quadword from stack pointer - simplified
+            OpCode::Clqsp => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
+                let addr = base.wrapping_add(imm);
+                let val = self.memory.read_u64(addr);
+                self.set_x(hart_id, inst.get_r0(), val);
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.SW: Store word to memory
+            OpCode::Csw => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
+                let addr = base.wrapping_add(imm);
+                let val = self.get_x(hart_id, inst.get_r0()) as u32;
+                self.memory.write_u32(addr, val);
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.SWSP: Store word to stack pointer
+            OpCode::Cswsp => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
+                let addr = base.wrapping_add(imm);
+                let val = self.get_x(hart_id, inst.get_r0()) as u32;
+                self.memory.write_u32(addr, val);
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.SD: Store doubleword to memory
+            OpCode::Csd => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
+                let addr = base.wrapping_add(imm);
+                let val = self.get_x(hart_id, inst.get_r0());
+                self.memory.write_u64(addr, val);
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.SDSP: Store doubleword to stack pointer
+            OpCode::Csdsp => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
+                let addr = base.wrapping_add(imm);
+                let val = self.get_x(hart_id, inst.get_r0());
+                self.memory.write_u64(addr, val);
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.SQ: Store quadword - simplified to store 64 bits
+            OpCode::Csq => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
+                let addr = base.wrapping_add(imm);
+                let val = self.get_x(hart_id, inst.get_r0());
+                self.memory.write_u64(addr, val);
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.SQSP: Store quadword to stack pointer - simplified
+            OpCode::Csqsp => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
+                let addr = base.wrapping_add(imm);
+                let val = self.get_x(hart_id, inst.get_r0());
+                self.memory.write_u64(addr, val);
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.FLW: Load float (single-precision)
+            OpCode::Cflw => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
+                let addr = base.wrapping_add(imm);
+                let val = self.memory.read_u32(addr);
+                self.set_f32(hart_id, inst.get_r0(), f32::from_bits(val));
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.FLWSP: Load float from stack pointer
+            OpCode::Cflwsp => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
+                let addr = base.wrapping_add(imm);
+                let val = self.memory.read_u32(addr);
+                self.set_f32(hart_id, inst.get_r0(), f32::from_bits(val));
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.FLD: Load double
+            OpCode::Cfld => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
+                let addr = base.wrapping_add(imm);
+                let val = self.memory.read_u64(addr);
+                self.set_f(hart_id, inst.get_r0(), f64::from_bits(val));
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.FLDSP: Load double from stack pointer
+            OpCode::Cfldsp => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
+                let addr = base.wrapping_add(imm);
+                let val = self.memory.read_u64(addr);
+                self.set_f(hart_id, inst.get_r0(), f64::from_bits(val));
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.FSW: Store float
+            OpCode::Cfsw => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
+                let addr = base.wrapping_add(imm);
+                let val = self.get_f32(hart_id, inst.get_r0());
+                self.memory.write_u32(addr, val.to_bits());
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.FSWSP: Store float to stack pointer
+            OpCode::Cfswsp => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
+                let addr = base.wrapping_add(imm);
+                let val = self.get_f32(hart_id, inst.get_r0());
+                self.memory.write_u32(addr, val.to_bits());
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.FSD: Store double
+            OpCode::Cfsd => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
+                let addr = base.wrapping_add(imm);
+                let val = self.get_f(hart_id, inst.get_r0());
+                self.memory.write_u64(addr, val.to_bits());
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.FSDSP: Store double to stack pointer
+            OpCode::Cfsdsp => {
+                let base = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
+                let addr = base.wrapping_add(imm);
+                let val = self.get_f(hart_id, inst.get_r0());
+                self.memory.write_u64(addr, val.to_bits());
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.ADDI4SPN: Add immediate * 4 to sp, store in rd
+            OpCode::Caddi4spn => {
+                let sp_val = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
+                self.set_x(hart_id, inst.get_r0(), sp_val.wrapping_add(imm));
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.ADDI: Add immediate to rs1, store in rd
+            OpCode::Caddi => {
+                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
+                self.set_x(hart_id, inst.get_r0(), rs1.wrapping_add(imm));
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.ADDIW: Add word immediate
+            OpCode::Caddiw => {
+                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+                let result = (rs1 as i32).wrapping_add(imm as i32) as i64 as u64;
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.ADDI16SP: Add immediate * 16 to sp
+            OpCode::Caddi16sp => {
+                let sp_val = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+                self.set_x(hart_id, inst.get_r0(), (sp_val as i64).wrapping_add(imm) as u64);
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.LI: Load immediate (rd = imm, rs1 = x0)
+            OpCode::Cli => {
+                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+                self.set_x(hart_id, inst.get_r0(), imm as u64);
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.LUI: Load upper immediate
+            OpCode::Clui => {
+                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+                self.set_x(hart_id, inst.get_r0(), imm as u64);
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.SLLI: Shift left logical immediate (RV32)
+            OpCode::Cslli => {
+                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let shamt = self.get_u64_from_imm(hart_id, inst.get_imm()) & 0x1F;
+                self.set_x(hart_id, inst.get_r0(), rs1 << shamt);
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.SLLI64: Shift left logical immediate (RV64)
+            OpCode::Cslli64 => {
+                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let shamt = self.get_u64_from_imm(hart_id, inst.get_imm()) & 0x3F;
+                self.set_x(hart_id, inst.get_r0(), rs1 << shamt);
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.SRLI: Shift right logical immediate
+            OpCode::Csrli => {
+                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let shamt = self.get_u64_from_imm(hart_id, inst.get_imm()) & 0x1F;
+                self.set_x(hart_id, inst.get_r0(), rs1 >> shamt);
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.SRLI64: Shift right logical immediate (RV64)
+            OpCode::Csrli64 => {
+                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let shamt = self.get_u64_from_imm(hart_id, inst.get_imm()) & 0x3F;
+                self.set_x(hart_id, inst.get_r0(), rs1 >> shamt);
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.SRAI: Shift right arithmetic immediate
+            OpCode::Csrai => {
+                let rs1 = self.get_x(hart_id, inst.get_r1()) as i32 as i64;
+                let shamt = self.get_u64_from_imm(hart_id, inst.get_imm()) & 0x1F;
+                self.set_x(hart_id, inst.get_r0(), (rs1 >> shamt) as u64);
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.SRAI64: Shift right arithmetic immediate (RV64)
+            OpCode::Csrai64 => {
+                let rs1 = self.get_x(hart_id, inst.get_r1()) as i64;
+                let shamt = self.get_u64_from_imm(hart_id, inst.get_imm()) & 0x3F;
+                self.set_x(hart_id, inst.get_r0(), (rs1 >> shamt) as u64);
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.ANDI: And immediate
+            OpCode::Candi => {
+                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+                self.set_x(hart_id, inst.get_r0(), rs1 & (imm as u64));
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.MV: Move (rd = rs2, rs1 is x0)
+            OpCode::Cmv => {
+                let rs2 = self.get_x(hart_id, inst.get_r2());
+                self.set_x(hart_id, inst.get_r0(), rs2);
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.ADD: Add (rd = rd + rs2)
+            OpCode::Cadd => {
+                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let rs2 = self.get_x(hart_id, inst.get_r2());
+                self.set_x(hart_id, inst.get_r0(), rs1.wrapping_add(rs2));
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.ADDW: Add word
+            OpCode::Caddw => {
+                let rs1 = self.get_x(hart_id, inst.get_r1()) as i32;
+                let rs2 = self.get_x(hart_id, inst.get_r2()) as i32;
+                let result = rs1.wrapping_add(rs2) as i64 as u64;
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.SUB: Subtract
+            OpCode::Csub => {
+                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let rs2 = self.get_x(hart_id, inst.get_r2());
+                self.set_x(hart_id, inst.get_r0(), rs1.wrapping_sub(rs2));
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.SUBW: Subtract word
+            OpCode::Csubw => {
+                let rs1 = self.get_x(hart_id, inst.get_r1()) as i32;
+                let rs2 = self.get_x(hart_id, inst.get_r2()) as i32;
+                let result = rs1.wrapping_sub(rs2) as i64 as u64;
+                self.set_x(hart_id, inst.get_r0(), result);
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.XOR: XOR
+            OpCode::Cxor => {
+                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let rs2 = self.get_x(hart_id, inst.get_r2());
+                self.set_x(hart_id, inst.get_r0(), rs1 ^ rs2);
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.OR: OR
+            OpCode::Cor => {
+                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let rs2 = self.get_x(hart_id, inst.get_r2());
+                self.set_x(hart_id, inst.get_r0(), rs1 | rs2);
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.AND: AND
+            OpCode::Cand => {
+                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let rs2 = self.get_x(hart_id, inst.get_r2());
+                self.set_x(hart_id, inst.get_r0(), rs1 & rs2);
+                self.next_pc_by(hart_id, 2)?;
+            }
+            // C.BEQZ: Branch if equal to zero
+            OpCode::Cbeqz => {
+                let rs1 = self.get_x(hart_id, inst.get_r1());
+                if rs1 == 0 {
+                    let offset = self.get_i64_from_imm(hart_id, inst.get_imm());
+                    let hart = self.get_hart_mut(hart_id).unwrap();
+                    hart.pc = ((hart.pc as i64).wrapping_add(offset)) as usize;
+                } else {
+                    self.next_pc_by(hart_id, 2)?;
+                }
+            }
+            // C.BNEZ: Branch if not equal to zero
+            OpCode::Cbnez => {
+                let rs1 = self.get_x(hart_id, inst.get_r1());
+                if rs1 != 0 {
+                    let offset = self.get_i64_from_imm(hart_id, inst.get_imm());
+                    let hart = self.get_hart_mut(hart_id).unwrap();
+                    hart.pc = ((hart.pc as i64).wrapping_add(offset)) as usize;
+                } else {
+                    self.next_pc_by(hart_id, 2)?;
+                }
+            }
+            // C.J: Jump (unconditional)
+            OpCode::Cj => {
+                let offset = self.get_i64_from_imm(hart_id, inst.get_imm());
+                let hart = self.get_hart_mut(hart_id).unwrap();
+                hart.pc = ((hart.pc as i64).wrapping_add(offset)) as usize;
+            }
+            // C.JAL: Jump and link (RV32 only, save return address in ra)
+            OpCode::Cjal => {
+                let ra_idx = self.registers.get_register_value(Some(&"ra".to_string())).unwrap() as usize;
+                let offset = self.get_i64_from_imm(hart_id, inst.get_imm());
+                let hart = self.get_hart_mut(hart_id).unwrap();
+                hart.x.regs[ra_idx].value = (hart.pc + 2) as u64;
+                hart.pc = ((hart.pc as i64).wrapping_add(offset)) as usize;
+            }
+            // C.JR: Jump register (rs1 = target, rd = x0 for C.JR)
+            OpCode::Cjr => {
+                let target = self.get_x(hart_id, inst.get_r1());
+                let hart = self.get_hart_mut(hart_id).unwrap();
+                hart.pc = target as usize;
+            }
+            // C.JALR: Jump and link register
+            OpCode::Cjalr => {
+                let target = self.get_x(hart_id, inst.get_r1());
+                let ra_idx = self.registers.get_register_value(Some(&"ra".to_string())).unwrap() as usize;
+                let hart = self.get_hart_mut(hart_id).unwrap();
+                hart.x.regs[ra_idx].value = (hart.pc + 2) as u64;
+                hart.pc = target as usize;
+            }
+            // C.EBREAK: Breakpoint (same as EBREAK but compact)
+            OpCode::Cebreak => {
+                let hart = self.get_hart_mut(hart_id).unwrap();
+                hart.take_trap(EXCEPTION_BREAKPOINT, hart.pc as u64, false);
+            }
+            // C.NOP: No operation (C.ADDI x0, x0, 0)
+            OpCode::Cnop => {
+                self.next_pc_by(hart_id, 2)?;
+            }
             _ => {
                 return Err(DebuggerError::GeneralError(format!("unsupported instruction: {:?}", opcode)));
             }
@@ -1755,9 +2614,13 @@ impl Machine {
     }
 
     fn next_pc(&mut self, hart_id: HartId) -> Result<(), DebuggerError> {
+        self.next_pc_by(hart_id, PC_INCREMENT)
+    }
+
+    fn next_pc_by(&mut self, hart_id: HartId, delta: usize) -> Result<(), DebuggerError> {
         let err_msg = format!("invalid hart: {}", hart_id);
         let hart = self.get_hart_mut(hart_id).ok_or_else(|| DebuggerError::GeneralError(err_msg))?;
-        hart.next_pc();
+        hart.pc += delta;
         Ok(())
     }
 
@@ -1802,6 +2665,18 @@ impl Machine {
             }
             Err(_) => None,
         }
+    }
+
+    /// Read a CSR register by its address (delegates to Hart)
+    fn read_csr(&self, hart_id: HartId, addr: u64) -> u64 {
+        let hart = self.get_hart(hart_id).unwrap();
+        hart.read_csr(addr)
+    }
+
+    /// Write a value to a CSR register by its address (delegates to Hart)
+    fn write_csr(&mut self, hart_id: HartId, addr: u64, value: u64) {
+        let hart = self.get_hart_mut(hart_id).unwrap();
+        hart.write_csr(addr, value);
     }
 }
 

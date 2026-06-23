@@ -1,4 +1,4 @@
-use core_utils::filesystem::read_file_to_string;
+﻿use core_utils::filesystem::read_file_to_string;
 use riscv_asm_lib::r5asm::assembler::*;
 use std::path::PathBuf;
 
@@ -2016,4 +2016,722 @@ main:
     set_reg(&mut m, "t1", 5u64);
     step(&mut m);
     assert!((get_freg(&m, "f0") - 5.0).abs() < 0.0001);
+}
+
+// ============================================================
+// FMA Float32 tests
+// ============================================================
+
+#[test]
+fn test_fmadds() {
+    // fmadd.s rd, rs1, rs2, rs3 => rd = (rs1 * rs2) + rs3
+    let asm = r#"
+.text
+main:
+    fmadd.s f0, f1, f2, f3
+"#;
+    let mut m = setup_machine(asm);
+    set_freg(&mut m, "f1", 2.0f32 as f64);
+    set_freg(&mut m, "f2", 3.0f32 as f64);
+    set_freg(&mut m, "f3", 4.0f32 as f64);
+    step(&mut m);
+    // (2.0 * 3.0) + 4.0 = 10.0
+    assert!((get_freg(&m, "f0") - 10.0).abs() < 0.0001);
+}
+
+#[test]
+fn test_fmsubs() {
+    // fmsub.s rd, rs1, rs2, rs3 => rd = (rs1 * rs2) - rs3
+    let asm = r#"
+.text
+main:
+    fmsub.s f0, f1, f2, f3
+"#;
+    let mut m = setup_machine(asm);
+    set_freg(&mut m, "f1", 2.0f32 as f64);
+    set_freg(&mut m, "f2", 3.0f32 as f64);
+    set_freg(&mut m, "f3", 4.0f32 as f64);
+    step(&mut m);
+    // (2.0 * 3.0) - 4.0 = 2.0
+    assert!((get_freg(&m, "f0") - 2.0).abs() < 0.0001);
+}
+
+#[test]
+fn test_fnmsubs() {
+    // fnmsub.s rd, rs1, rs2, rs3 => rd = -(rs1 * rs2) + rs3
+    let asm = r#"
+.text
+main:
+    fnmsub.s f0, f1, f2, f3
+"#;
+    let mut m = setup_machine(asm);
+    set_freg(&mut m, "f1", 2.0f32 as f64);
+    set_freg(&mut m, "f2", 3.0f32 as f64);
+    set_freg(&mut m, "f3", 4.0f32 as f64);
+    step(&mut m);
+    // -(2.0 * 3.0) + 4.0 = -2.0
+    assert!((get_freg(&m, "f0") + 2.0).abs() < 0.0001);
+}
+
+#[test]
+fn test_fnmadds() {
+    // fnmadd.s rd, rs1, rs2, rs3 => rd = -(rs1 * rs2) - rs3
+    let asm = r#"
+.text
+main:
+    fnmadd.s f0, f1, f2, f3
+"#;
+    let mut m = setup_machine(asm);
+    set_freg(&mut m, "f1", 2.0f32 as f64);
+    set_freg(&mut m, "f2", 3.0f32 as f64);
+    set_freg(&mut m, "f3", 4.0f32 as f64);
+    step(&mut m);
+    // -(2.0 * 3.0) - 4.0 = -10.0
+    assert!((get_freg(&m, "f0") + 10.0).abs() < 0.0001);
+}
+
+// ============================================================
+// FMA Float64 tests
+// ============================================================
+
+#[test]
+fn test_fmaddd() {
+    // fmadd.d rd, rs1, rs2, rs3 => rd = (rs1 * rs2) + rs3
+    let asm = r#"
+.text
+main:
+    fmadd.d f0, f1, f2, f3
+"#;
+    let mut m = setup_machine(asm);
+    set_freg(&mut m, "f1", 2.0);
+    set_freg(&mut m, "f2", 3.0);
+    set_freg(&mut m, "f3", 4.0);
+    step(&mut m);
+    // (2.0 * 3.0) + 4.0 = 10.0
+    assert!((get_freg(&m, "f0") - 10.0).abs() < 0.0001);
+}
+
+#[test]
+fn test_fmsubd() {
+    // fmsub.d rd, rs1, rs2, rs3 => rd = (rs1 * rs2) - rs3
+    let asm = r#"
+.text
+main:
+    fmsub.d f0, f1, f2, f3
+"#;
+    let mut m = setup_machine(asm);
+    set_freg(&mut m, "f1", 2.0);
+    set_freg(&mut m, "f2", 3.0);
+    set_freg(&mut m, "f3", 4.0);
+    step(&mut m);
+    // (2.0 * 3.0) - 4.0 = 2.0
+    assert!((get_freg(&m, "f0") - 2.0).abs() < 0.0001);
+}
+
+#[test]
+fn test_fnmsubd() {
+    // fnmsub.d rd, rs1, rs2, rs3 => rd = -(rs1 * rs2) + rs3
+    let asm = r#"
+.text
+main:
+    fnmsub.d f0, f1, f2, f3
+"#;
+    let mut m = setup_machine(asm);
+    set_freg(&mut m, "f1", 2.0);
+    set_freg(&mut m, "f2", 3.0);
+    set_freg(&mut m, "f3", 4.0);
+    step(&mut m);
+    // -(2.0 * 3.0) + 4.0 = -2.0
+    assert!((get_freg(&m, "f0") + 2.0).abs() < 0.0001);
+}
+
+#[test]
+fn test_fnmaddd() {
+    // fnmadd.d rd, rs1, rs2, rs3 => rd = -(rs1 * rs2) - rs3
+    let asm = r#"
+.text
+main:
+    fnmadd.d f0, f1, f2, f3
+"#;
+    let mut m = setup_machine(asm);
+    set_freg(&mut m, "f1", 2.0);
+    set_freg(&mut m, "f2", 3.0);
+    set_freg(&mut m, "f3", 4.0);
+    step(&mut m);
+    // -(2.0 * 3.0) - 4.0 = -10.0
+    assert!((get_freg(&m, "f0") + 10.0).abs() < 0.0001);
+}
+
+// ============================================================
+// Float Load/Store 32-bit tests
+// ============================================================
+
+#[test]
+fn test_flw() {
+    // flw rd, offset(rs1) => load 32-bit float from memory
+    let asm = r#"
+.text
+main:
+    flw f0, 0(t1)
+"#;
+    let mut m = setup_machine(asm);
+    let test_addr: u64 = 0x1000;
+    set_reg(&mut m, "t1", test_addr);
+    let val = 3.14f32;
+    let bits = val.to_bits();
+    m.memory.write_u32(test_addr, bits);
+    step(&mut m);
+    assert!((get_freg(&m, "f0") - 3.14).abs() < 0.001);
+}
+
+#[test]
+fn test_fsw() {
+    // fsw rs2, offset(rs1) => store 32-bit float to memory
+    let asm = r#"
+.text
+main:
+    fsw f0, 0(t1)
+"#;
+    let mut m = setup_machine(asm);
+    let test_addr: u64 = 0x1000;
+    set_reg(&mut m, "t1", test_addr);
+    set_freg(&mut m, "f0", 3.14f32 as f64);
+    step(&mut m);
+    let result_bits = m.memory.read_u32(test_addr);
+    let result = f32::from_bits(result_bits);
+    assert!((result - 3.14f32).abs() < 0.001);
+}
+
+// ============================================================
+// Krypto: Zbkb - Pack/Packh/Packw tests
+// ============================================================
+
+#[test]
+fn test_pack() {
+    // Zbkb pack: X(rd) = {X(rs2)[31:0], X(rs1)[31:0]}
+    // rs1 = 0x12345678ABCDEF00, rs1[31:0] = 0xABCDEF00
+    // rs2 = 0xAABBCCDDEEFF0011, rs2[31:0] = 0xEEFF0011
+    let asm = r#"
+.text
+main:
+    pack t0, t1, t2
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0x12345678ABCDEF00u64);
+    set_reg(&mut m, "t2", 0xAABBCCDDEEFF0011u64);
+    step(&mut m);
+    assert_eq!(get_reg(&m, "t0"), 0xEEFF0011ABCDEF00u64);
+}
+
+#[test]
+fn test_packh() {
+    // Zbkb packh: interleave low bytes of rs1 and rs2 into halfwords
+    // rs1 = 0x0123456789ABCDEF (little-endian: byte0=0xEF, byte1=0xCD, ...)
+    // rs2 = 0x1020304050607080 (little-endian: byte0=0x80, byte1=0x70, ...)
+    // result[15:0]   = rs2[7:0]<<8   | rs1[7:0]   = 0x80EF
+    // result[31:16]  = rs2[15:8]<<8  | rs1[15:8]  = 0x70CD
+    // result[47:32]  = rs2[23:16]<<8 | rs1[23:16] = 0x60AB
+    // result[63:48]  = rs2[31:24]<<8 | rs1[31:24] = 0x5089
+    let asm = r#"
+.text
+main:
+    packh t0, t1, t2
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0x0123456789ABCDEFu64);
+    set_reg(&mut m, "t2", 0x1020304050607080u64);
+    step(&mut m);
+    assert_eq!(get_reg(&m, "t0"), 0x508960AB70CD80EFu64);
+}
+
+#[test]
+fn test_packw() {
+    let asm = r#"
+.text
+main:
+    packw t0, t1, t2
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0xABCDu64);
+    set_reg(&mut m, "t2", 0x1234u64);
+    step(&mut m);
+    assert_eq!(get_reg(&m, "t0"), 0x1234ABCDu64);
+}
+
+// ============================================================
+// Krypto: Zbkb - Brev8/Zip/Unzip tests
+// ============================================================
+
+#[test]
+fn test_brev8() {
+    let asm = r#"
+.text
+main:
+    brev8 t0, t1
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0x0102030405060708u64);
+    step(&mut m);
+    // Each byte bit-reversed in place (Zbkb brev8):
+    // byte 7: 0x01 -> 0x80, byte 6: 0x02 -> 0x40, byte 5: 0x03 -> 0xC0, byte 4: 0x04 -> 0x20,
+    // byte 3: 0x05 -> 0xA0, byte 2: 0x06 -> 0x60, byte 1: 0x07 -> 0xE0, byte 0: 0x08 -> 0x10
+    assert_eq!(get_reg(&m, "t0"), 0x8040C020A060E010u64);
+}
+
+#[test]
+fn test_zip() {
+    let asm = r#"
+.text
+main:
+    zip t0, t1
+"#;
+    let mut m = setup_machine(asm);
+    // 0xFFFF0000_0000FFFF: low32=0x0000FFFF, high32=0xFFFF0000
+    // interleave: bits from low go to even positions, bits from high go to odd
+    set_reg(&mut m, "t1", 0xFFFF00000000FFFFu64);
+    step(&mut m);
+    // After zip: each bit from low32 goes to even positions, from high32 to odd
+    // low32=0x0000FFFF -> bits 0-15 set in even positions -> 0x5555
+    // high32=0xFFFF0000 -> bits 48-63 set in odd positions -> 0xAAAA...
+    // Result: 0xAAAAAAAA55555555
+    assert_eq!(get_reg(&m, "t0"), 0xAAAAAAAA55555555u64);
+}
+
+#[test]
+fn test_unzip() {
+    let asm = r#"
+.text
+main:
+    unzip t0, t1
+"#;
+    let mut m = setup_machine(asm);
+    // Input: 0xAAAAAAAA55555555
+    // Even bits (0,2,4,...) go to low32: 0x55555555 -> 0x0000FFFF
+    // Odd bits (1,3,5,...) go to high32: 0xAAAAAAAA -> 0xFFFF0000
+    set_reg(&mut m, "t1", 0xAAAAAAAA55555555u64);
+    step(&mut m);
+    assert_eq!(get_reg(&m, "t0"), 0xFFFF00000000FFFFu64);
+}
+
+// ============================================================
+// Krypto: Zbkx - Xperm4/Xperm8 tests
+// ============================================================
+
+#[test]
+fn test_xperm4() {
+    // Zbkx xperm4: permute nibbles of rs2 based on indices in rs1
+    // rs1 = 0x321: nibble 0=0x1, nibble 1=0x2, nibble 2=0x3, nibble 3..15=0x0
+    // rs2 = 0xDCBA: nibble 0=0xA, nibble 1=0xB, nibble 2=0xC, nibble 3=0xD
+    // result nibble 0: idx=1 -> 0xB
+    // result nibble 1: idx=2 -> 0xC
+    // result nibble 2: idx=3 -> 0xD
+    // result nibble 3..15: idx=0 -> 0xA
+    let asm = r#"
+.text
+main:
+    xperm4 t0, t1, t2
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0x321u64);
+    set_reg(&mut m, "t2", 0xDCBAu64);
+    step(&mut m);
+    assert_eq!(get_reg(&m, "t0"), 0xAAAAAAAAAAAAADCBu64);
+}
+
+#[test]
+fn test_xperm8() {
+    // Zbkx xperm8: permute bytes of rs2 based on indices in rs1 (idx >= 8 -> 0)
+    // rs1 = 0x4030201: byte 0=0x01, byte 1=0x02, byte 2=0x03, byte 3=0x04, rest 0
+    // rs2 = 0x0807060504030201: byte 0=0x01, byte 1=0x02, ..., byte 7=0x08
+    // result byte 0: idx=1 -> rs2 byte 1 = 0x02
+    // result byte 1: idx=2 -> rs2 byte 2 = 0x03
+    // result byte 2: idx=3 -> rs2 byte 3 = 0x04
+    // result byte 3: idx=4 -> rs2 byte 4 = 0x05
+    // result byte 4-7: idx=0 -> rs2 byte 0 = 0x01
+    let asm = r#"
+.text
+main:
+    xperm8 t0, t1, t2
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0x4030201u64);
+    set_reg(&mut m, "t2", 0x0807060504030201u64);
+    step(&mut m);
+    assert_eq!(get_reg(&m, "t0"), 0x0101010105040302u64);
+}
+
+// ============================================================
+// Krypto: AES tests (with real AES S-Box/MixColumns)
+// ============================================================
+
+#[test]
+fn test_aes64es_zero() {
+    // aes64es: forward S-Box on each byte, then MixColumns on each 32-bit half, XOR rs2
+    // SBox[0x00] = 0x63 for all bytes -> 0x63636363_63636363
+    // MixColumns on 0x63636363 = 0x63636363 (all bytes equal)
+    // XOR with rs2=0 -> 0x63636363_63636363
+    let asm = r#"
+.text
+main:
+    aes64es t0, t1, t2
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0x0000000000000000u64);
+    set_reg(&mut m, "t2", 0x0000000000000000u64);
+    step(&mut m);
+    assert_eq!(get_reg(&m, "t0"), 0x6363636363636363u64);
+}
+
+#[test]
+fn test_aes64es_mixed() {
+    // aes64es: SubBytes + MixColumns on each 32-bit half, XOR rs2=0
+    // Input: 0x6745230167452301
+    // Each byte SubBytes then MixColumns on each 32-bit half
+    let asm = r#"
+.text
+main:
+    aes64es t0, t1, t2
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0x6745230167452301u64);
+    set_reg(&mut m, "t2", 0x0000000000000000u64);
+    step(&mut m);
+    assert_eq!(get_reg(&m, "t0"), 0xDD120779DD120779u64);
+}
+
+#[test]
+fn test_aes64es_with_rs2() {
+    // aes64es: SubBytes + MixColumns on rs1, then XOR with rs2
+    // Using zero rs1 for simplicity: SubBytes=0x63636363_63636363, MixColumns=0x63636363_63636363
+    // XOR with rs2=0xFFFFFFFF_FFFFFFFF = 0x9C9C9C9C_9C9C9C9C
+    let asm = r#"
+.text
+main:
+    aes64es t0, t1, t2
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0x0000000000000000u64);
+    set_reg(&mut m, "t2", 0xFFFFFFFFFFFFFFFFu64);
+    step(&mut m);
+    assert_eq!(get_reg(&m, "t0"), 0x9C9C9C9C9C9C9C9Cu64);
+}
+
+#[test]
+fn test_aes64ds_zero() {
+    // aes64ds: inverse S-Box on each byte, then inverse MixColumns on each 32-bit half, XOR rs2
+    // InvSBox[0x00] = 0x52 for all bytes -> 0x52525252_52525252
+    // InvMixColumns on 0x52525252 = 0x52525252 (all bytes equal)
+    // XOR with rs2=0 -> 0x52525252_52525252
+    let asm = r#"
+.text
+main:
+    aes64ds t0, t1, t2
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0x0000000000000000u64);
+    set_reg(&mut m, "t2", 0x0000000000000000u64);
+    step(&mut m);
+    assert_eq!(get_reg(&m, "t0"), 0x5252525252525252u64);
+}
+
+#[test]
+fn test_aes64esm_zero() {
+    // aes64esm: MixColumns on each 32-bit half of rs1, XOR with rs2
+    // MixColumns on 0x00000000 = 0x00000000, XOR 0 = 0
+    let asm = r#"
+.text
+main:
+    aes64esm t0, t1, t2
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0x0000000000000000u64);
+    set_reg(&mut m, "t2", 0x0000000000000000u64);
+    step(&mut m);
+    assert_eq!(get_reg(&m, "t0"), 0x0000000000000000u64);
+}
+
+#[test]
+fn test_aes64esm_mixed() {
+    // aes64esm: MixColumns on each 32-bit half, XOR rs2=0
+    // Input: 0x0100000001000000 (byte3=0x01, rest=0 in each 32-bit half)
+    // MixColumns: b0=0x00,b1=0x00,b2=0x00,b3=0x01 -> 0x02030101 per half
+    let asm = r#"
+.text
+main:
+    aes64esm t0, t1, t2
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0x0100000001000000u64);
+    set_reg(&mut m, "t2", 0x0000000000000000u64);
+    step(&mut m);
+    assert_eq!(get_reg(&m, "t0"), 0x0203010102030101u64);
+}
+
+#[test]
+fn test_aes64dsm_zero() {
+    // aes64dsm: inverse MixColumns on each 32-bit half, XOR with rs2
+    // InvMixColumns on 0x00000000 = 0x00000000, XOR 0 = 0
+    let asm = r#"
+.text
+main:
+    aes64dsm t0, t1, t2
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0x0000000000000000u64);
+    set_reg(&mut m, "t2", 0x0000000000000000u64);
+    step(&mut m);
+    assert_eq!(get_reg(&m, "t0"), 0x0000000000000000u64);
+}
+
+#[test]
+fn test_aes64dsm_mixed() {
+    // aes64dsm: InvMixColumns on each 32-bit half, XOR rs2=0
+    // Input: 0x0100000001000000 (byte3=0x01, rest=0 in each 32-bit half)
+    // InvMixColumns: b0=0x00,b1=0x00,b2=0x00,b3=0x01 -> 0x0E0B0D09 per half
+    let asm = r#"
+.text
+main:
+    aes64dsm t0, t1, t2
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0x0100000001000000u64);
+    set_reg(&mut m, "t2", 0x0000000000000000u64);
+    step(&mut m);
+    assert_eq!(get_reg(&m, "t0"), 0x0E0B0D090E0B0D09u64);
+}
+
+#[test]
+fn test_aes64im_zero() {
+    // aes64im: inverse MixColumns on 64-bit value (treat as 2x2 state of 32-bit columns)
+    // All zeros -> InvMixColumns on 0x00000000 = 0
+    let asm = r#"
+.text
+main:
+    aes64im t0, t1
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0x0000000000000000u64);
+    step(&mut m);
+    assert_eq!(get_reg(&m, "t0"), 0x0000000000000000u64);
+}
+
+#[test]
+fn test_aes64im_nonzero() {
+    // aes64im: InvMixColumns on each 32-bit half (same as aes64dsm without rs2 XOR)
+    // Input: 0x0100000001000000 -> InvMixColumns per half = 0x0E0B0D09
+    let asm = r#"
+.text
+main:
+    aes64im t0, t1
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0x0100000001000000u64);
+    step(&mut m);
+    assert_eq!(get_reg(&m, "t0"), 0x0E0B0D090E0B0D09u64);
+}
+
+#[test]
+fn test_aes64ks1i_rcon1() {
+    // aes64ks1i: SubWord(RotWord(w1)) ^ rcon, w1=0, rcon=1
+    // SubWord(0) = 0x63636363, XOR rcon in MSB: 0x62_636363
+    let asm = r#"
+.text
+main:
+    aes64ks1i t0, t1, 1
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0x0000000000000000u64);
+    step(&mut m);
+    assert_eq!(get_reg(&m, "t0"), 0x62636363u64);
+}
+
+#[test]
+fn test_aes64ks1i_rcon5() {
+    // aes64ks1i with rcon=5: SubWord(0)=0x63636363, XOR rcon=5 in MSB -> 0x66_636363
+    let asm = r#"
+.text
+main:
+    aes64ks1i t0, t1, 5
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0x0000000000000000u64);
+    step(&mut m);
+    assert_eq!(get_reg(&m, "t0"), 0x66636363u64);
+}
+
+#[test]
+fn test_aes64ks2() {
+    // aes64ks2: XOR rs1 with rs2 (two round key words)
+    let asm = r#"
+.text
+main:
+    aes64ks2 t0, t1, t2
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0x0123456789ABCDEFu64);
+    set_reg(&mut m, "t2", 0xFEDCBA9876543210u64);
+    step(&mut m);
+    assert_eq!(get_reg(&m, "t0"), 0xFFFFFFFFFFFFFFFFu64);
+}
+
+// ============================================================
+// Krypto: SHA256 tests
+// ============================================================
+
+#[test]
+fn test_sha256sig0() {
+    let asm = r#"
+.text
+main:
+    sha256sig0 t0, t1
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0x1234567890ABCDEFu64);
+    step(&mut m);
+    let val = 0x1234567890ABCDEFu64;
+    let expected = val.rotate_right(7) ^ val.rotate_right(18) ^ (val >> 3);
+    assert_eq!(get_reg(&m, "t0"), expected);
+}
+
+#[test]
+fn test_sha256sig1() {
+    let asm = r#"
+.text
+main:
+    sha256sig1 t0, t1
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0x1234567890ABCDEFu64);
+    step(&mut m);
+    let val = 0x1234567890ABCDEFu64;
+    let expected = val.rotate_right(17) ^ val.rotate_right(19) ^ (val >> 10);
+    assert_eq!(get_reg(&m, "t0"), expected);
+}
+
+#[test]
+fn test_sha256sum0() {
+    let asm = r#"
+.text
+main:
+    sha256sum0 t0, t1
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0x1234567890ABCDEFu64);
+    step(&mut m);
+    let val = 0x1234567890ABCDEFu64;
+    let expected = val.rotate_right(2) ^ val.rotate_right(13) ^ val.rotate_right(22);
+    assert_eq!(get_reg(&m, "t0"), expected);
+}
+
+#[test]
+fn test_sha256sum1() {
+    let asm = r#"
+.text
+main:
+    sha256sum1 t0, t1
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0x1234567890ABCDEFu64);
+    step(&mut m);
+    let val = 0x1234567890ABCDEFu64;
+    let expected = val.rotate_right(6) ^ val.rotate_right(11) ^ val.rotate_right(25);
+    assert_eq!(get_reg(&m, "t0"), expected);
+}
+
+// ============================================================
+// Krypto: SHA512 tests
+// ============================================================
+
+#[test]
+fn test_sha512sig0() {
+    let asm = r#"
+.text
+main:
+    sha512sig0 t0, t1
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0x1234567890ABCDEFu64);
+    step(&mut m);
+    let val = 0x1234567890ABCDEFu64;
+    let expected = val.rotate_right(1) ^ val.rotate_right(8) ^ (val >> 7);
+    assert_eq!(get_reg(&m, "t0"), expected);
+}
+
+#[test]
+fn test_sha512sig1() {
+    let asm = r#"
+.text
+main:
+    sha512sig1 t0, t1
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0x1234567890ABCDEFu64);
+    step(&mut m);
+    let val = 0x1234567890ABCDEFu64;
+    let expected = val.rotate_right(19) ^ val.rotate_right(61) ^ (val >> 6);
+    assert_eq!(get_reg(&m, "t0"), expected);
+}
+
+#[test]
+fn test_sha512sum0() {
+    let asm = r#"
+.text
+main:
+    sha512sum0 t0, t1
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0x1234567890ABCDEFu64);
+    step(&mut m);
+    let val = 0x1234567890ABCDEFu64;
+    let expected = val.rotate_right(28) ^ val.rotate_right(34) ^ val.rotate_right(39);
+    assert_eq!(get_reg(&m, "t0"), expected);
+}
+
+#[test]
+fn test_sha512sum1() {
+    let asm = r#"
+.text
+main:
+    sha512sum1 t0, t1
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0x1234567890ABCDEFu64);
+    step(&mut m);
+    let val = 0x1234567890ABCDEFu64;
+    let expected = val.rotate_right(14) ^ val.rotate_right(18) ^ val.rotate_right(41);
+    assert_eq!(get_reg(&m, "t0"), expected);
+}
+
+// ============================================================
+// Krypto: SM3 tests
+// ============================================================
+
+#[test]
+fn test_sm3p0() {
+    let asm = r#"
+.text
+main:
+    sm3p0 t0, t1
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0x1234567890ABCDEFu64);
+    step(&mut m);
+    let val = 0x1234567890ABCDEFu64;
+    let expected = val ^ val.rotate_right(9) ^ val.rotate_right(17);
+    assert_eq!(get_reg(&m, "t0"), expected);
+}
+
+#[test]
+fn test_sm3p1() {
+    let asm = r#"
+.text
+main:
+    sm3p1 t0, t1
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0x1234567890ABCDEFu64);
+    step(&mut m);
+    let val = 0x1234567890ABCDEFu64;
+    let expected = val ^ val.rotate_right(15) ^ val.rotate_right(23);
+    assert_eq!(get_reg(&m, "t0"), expected);
 }
