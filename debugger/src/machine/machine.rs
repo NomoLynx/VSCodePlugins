@@ -480,7 +480,681 @@ impl Machine {
         self.next_pc(hart_id)
     }
 
+    // ============================================================
+    // Vector instruction helpers
+    // ============================================================
+
+    /// Get vector register index from register name
+    fn vreg(&self, name: &Option<String>) -> usize {
+        self.registers
+            .get_register_value(name.as_ref())
+            .unwrap() as usize
+    }
+
+    /// Read vector register bytes
+    fn get_vreg_bytes(&self, hart_id: HartId, reg: Option<&String>) -> Vec<u8> {
+        let idx = self.vreg(&reg.cloned());
+        let hart = self.get_hart(hart_id).unwrap();
+        hart.v.regs[idx].bytes.clone()
+    }
+
+    /// Write vector register bytes
+    fn set_vreg_bytes(&mut self, hart_id: HartId, reg: Option<&String>, bytes: Vec<u8>) {
+        let idx = self.vreg(&reg.cloned());
+        let hart = self.get_hart_mut(hart_id).unwrap();
+        if idx != 0 {
+            hart.v.regs[idx].bytes = bytes;
+        }
+    }
+
+    /// Read vector register bytes by index (for segment load/store)
+    fn get_vreg_bytes_by_idx(&self, hart_id: HartId, idx: usize) -> Vec<u8> {
+        let hart = self.get_hart(hart_id).unwrap();
+        if idx < hart.v.regs.len() {
+            hart.v.regs[idx].bytes.clone()
+        } else {
+            vec![0u8; 64]
+        }
+    }
+
+    /// Write vector register bytes by index (for segment load/store)
+    fn set_vreg_bytes_by_idx(&mut self, hart_id: HartId, idx: usize, bytes: Vec<u8>) {
+        let hart = self.get_hart_mut(hart_id).unwrap();
+        if idx != 0 && idx < hart.v.regs.len() {
+            hart.v.regs[idx].bytes = bytes;
+        }
+    }
+
+    /// Get SEW (selected element width) in bytes from vtype
+    fn get_sew_bytes(&self, hart_id: HartId) -> usize {
+        let hart = self.get_hart(hart_id).unwrap();
+        let vtype = hart.csr.vtype;
+        let sew_enc = ((vtype >> 3) & 0x7) as u8;
+        match sew_enc {
+            0b000 => 1,  // e8
+            0b001 => 2,  // e16
+            0b010 => 4,  // e32
+            0b011 => 8,  // e64
+            0b100 => 16, // e128
+            0b101 => 32, // e256
+            0b110 => 64, // e512
+            0b111 => 128,// e1024
+            _ => 4,
+        }
+    }
+
+    /// Get VL (vector length) from CSR
+    fn get_vl(&self, hart_id: HartId) -> usize {
+        let hart = self.get_hart(hart_id).unwrap();
+        hart.csr.vl as usize
+    }
+
+    /// Determine element width from instruction name (e.g. "vadd.vv" has no width suffix -> use SEW)
+    fn get_elem_width_from_name(name: &str) -> Option<usize> {
+        let lower = name.to_lowercase();
+        if lower.contains("1024") { return Some(128); }
+        if lower.contains("512") { return Some(64); }
+        if lower.contains("256") { return Some(32); }
+        if lower.contains("128") { return Some(16); }
+        if lower.contains("64") { return Some(8); }
+        if lower.contains("32") { return Some(4); }
+        if lower.contains("16") { return Some(2); }
+        if lower.contains("8") { return Some(1); }
+        None
+    }
+
+    /// Get effective element width: explicit width from name takes priority over SEW
+    fn get_elem_width(&self, hart_id: HartId, name: &str) -> usize {
+        Self::get_elem_width_from_name(name).unwrap_or_else(|| self.get_sew_bytes(hart_id))
+    }
+
+    /// Check if instruction is masked (option is "v0.t")
+    fn is_masked(inst: &Instruction) -> bool {
+        match inst.get_instruction_option() {
+            Some(s) => s.to_lowercase() == "v0.t",
+            None => false,
+        }
+    }
+
+    /// Execute vector instruction dispatch
+    fn execute_vector_inst(&mut self, hart_id: HartId, inst: &Instruction) -> Result<(), DebuggerError> {
+        let name = inst.get_instruction_name().to_lowercase();
+
+        // vsetvl/vsetvli/vsetivli - vector config
+        if name.starts_with("vsetvl") || name.starts_with("vsetvli") || name.starts_with("vsetivli") {
+            return self.execute_vset(hart_id, inst);
+        }
+
+        // vle* / vlse* / vluxei* / vloxei* / vl*re* - vector loads
+        if name.starts_with("vle") || name.starts_with("vlse") || name.starts_with("vluxei") || name.starts_with("vloxei")
+            || name.starts_with("vl1r") || name.starts_with("vl2r") || name.starts_with("vl3r") || name.starts_with("vl4r")
+            || name.starts_with("vl1re") || name.starts_with("vl2re") || name.starts_with("vl3re") || name.starts_with("vl4re")
+        {
+            return self.execute_vload(hart_id, inst);
+        }
+
+        // vse* / vsse* / vsuxei* / vsoxei* / vs*r - vector stores
+        if name.starts_with("vse") || name.starts_with("vsse") || name.starts_with("vsuxei") || name.starts_with("vsoxei")
+            || name.starts_with("vs1r") || name.starts_with("vs2r") || name.starts_with("vs3r") || name.starts_with("vs4r")
+        {
+            return self.execute_vstore(hart_id, inst);
+        }
+
+        // vred*.vs - reductions
+        if name.contains(".vs") && name.starts_with("vred") {
+            return self.execute_vreduction(hart_id, inst);
+        }
+
+        // vand.mm / vor.mm / vxor.mm / vnot.m - mask instructions
+        if (name.ends_with(".mm") || name.ends_with(".m")) && !name.starts_with("vms") {
+            return self.execute_vmask(hart_id, inst);
+        }
+
+        // v*.vv / v*.vx / v*.vi - vector value instructions
+        // Also handle .v suffix (e.g., vmv.v.v, vredsum.vs is handled above)
+        if name.ends_with(".vv") || name.ends_with(".vx") || name.ends_with(".vi") || name.ends_with(".v.v") {
+            return self.execute_vvalue(hart_id, inst);
+        }
+
+        Err(DebuggerError::GeneralError(format!("unsupported vector instruction: {}", name)))
+    }
+
+    /// Execute vsetvl/vsetvli/vsetivli
+    fn execute_vset(&mut self, hart_id: HartId, inst: &Instruction) -> Result<(), DebuggerError> {
+        let name = inst.get_instruction_name().to_lowercase();
+
+        let (avl, vtypei) = if name.starts_with("vsetivli") {
+            let avl = inst.get_imm()
+                .and_then(|i| {
+                    if let Imm::Value(s) = i {
+                        core_utils::number::get_u64_from_str(s).ok()
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0) as usize;
+            let vtypei = inst.get_instruction_option()
+                .and_then(|opt| Self::parse_vtypei(opt))
+                .unwrap_or(0);
+            (avl, vtypei)
+        } else if name.starts_with("vsetvli") {
+            let rs1 = inst.get_r1();
+            let avl = self.get_x(hart_id, rs1) as usize;
+            let vtypei = inst.get_instruction_option()
+                .and_then(|opt| Self::parse_vtypei(opt))
+                .unwrap_or(0);
+            (avl, vtypei)
+        } else {
+            // vsetvl rd, rs1, rs2
+            let rs1 = inst.get_r1();
+            let rs2 = inst.get_r2();
+            let avl = self.get_x(hart_id, rs1) as usize;
+            let vtypei = self.get_x(hart_id, rs2);
+            (avl, vtypei)
+        };
+
+        let vl = {
+            let hart = self.get_hart_mut(hart_id).unwrap();
+            hart.csr.vl = avl as u64;
+            hart.csr.vtype = vtypei;
+            hart.vector_state.vl = avl;
+            hart.vector_state.sew = 1 << (((vtypei >> 3) & 0x7) as usize);
+            hart.vector_state.lmul = 1;
+            avl as u64
+        };
+
+        self.set_x(hart_id, inst.get_r0(), vl);
+        self.next_pc(hart_id)?;
+        Ok(())
+    }
+
+    /// Parse vtypei from option string like "e32,m1,ta,ma"
+    fn parse_vtypei(opt: &str) -> Option<u64> {
+        let s = opt.to_lowercase().replace(' ', "");
+        let parts: Vec<&str> = s.split(',').collect();
+        if parts.len() < 2 { return None; }
+        let sew = match parts[0] {
+            "e8" => 0u64, "e16" => 1, "e32" => 2, "e64" => 3,
+            "e128" => 4, "e256" => 5, "e512" => 6, "e1024" => 7,
+            _ => return None,
+        };
+        let lmul = match parts[1] {
+            "m1" => 0u64, "m2" => 1, "m4" => 2, "m8" => 3,
+            "mf8" => 5, "mf4" => 6, "mf2" => 7,
+            _ => return None,
+        };
+        let mut vta = 0u64;
+        let mut vma = 0u64;
+        for part in &parts[2..] {
+            match *part {
+                "ta" => vta = 1,
+                "ma" => vma = 1,
+                _ => {}
+            }
+        }
+        Some((vma << 7) | (vta << 6) | (sew << 3) | lmul)
+    }
+
+    /// Execute vector value instructions (VV/VX/VI forms)
+    fn execute_vvalue(&mut self, hart_id: HartId, inst: &Instruction) -> Result<(), DebuggerError> {
+        let name = inst.get_instruction_name().to_lowercase();
+        let vl = self.get_vl(hart_id);
+        let sew = self.get_elem_width(hart_id, &name);
+        let masked = Self::is_masked(inst);
+
+        if vl == 0 {
+            self.next_pc(hart_id)?;
+            return Ok(());
+        }
+
+        let is_vi = name.ends_with(".vi");
+        let is_vx = name.ends_with(".vx");
+
+        let base_name = name.split('.').next().unwrap_or(&name);
+        let op_name = if base_name == "vmv" { "move" }
+            else if base_name == "vmerge" { "merge" }
+            else if base_name.starts_with("vmseq") { "seq" }
+            else if base_name.starts_with("vmsltu") { "sltu" }
+            else if base_name.starts_with("vmslt") { "slt" }
+            else if base_name.starts_with("vmsle") { "sle" }
+            else if base_name.starts_with("vmsgtu") { "sgtu" }
+            else if let Some(stripped) = base_name.strip_prefix('v') { stripped }
+            else { base_name };
+
+        let vs2_bytes = self.get_vreg_bytes(hart_id, inst.get_r1());
+        let vs1_bytes = if is_vx || is_vi {
+            Vec::new()
+        } else {
+            self.get_vreg_bytes(hart_id, inst.get_r2())
+        };
+
+        let vs1_scalar = if is_vx || is_vi {
+            Some(if is_vi {
+                inst.get_imm()
+                    .and_then(|i| {
+                        if let Imm::Value(s) = i {
+                            core_utils::number::get_i64_from_str(s).ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(0) as u64
+            } else {
+                self.get_x(hart_id, inst.get_r2())
+            })
+        } else {
+            None
+        };
+
+        let vd_orig_bytes = self.get_vreg_bytes(hart_id, inst.get_r0());
+
+        let is_macc = op_name == "madd" || op_name == "nmsub" || op_name == "macc" || op_name == "nmacc";
+
+        let mut vd_bytes = if is_macc {
+            let mut b = vec![0u8; 64];
+            b[..vd_orig_bytes.len().min(64)].copy_from_slice(&vd_orig_bytes[..vd_orig_bytes.len().min(64)]);
+            b
+        } else if op_name == "merge" || op_name == "move" {
+            let mut b = vec![0u8; 64];
+            b[..vs2_bytes.len().min(64)].copy_from_slice(&vs2_bytes[..vs2_bytes.len().min(64)]);
+            b
+        } else {
+            vec![0u8; 64]
+        };
+
+        for i in 0..vl {
+            let byte_offset = i * sew;
+            if byte_offset + sew > 64 { break; }
+
+            if masked {
+                let v0_bytes = self.get_vreg_bytes(hart_id, Some(&"v0".to_string()));
+                let mask_byte = v0_bytes.get(byte_offset).copied().unwrap_or(0);
+                if mask_byte & 1 == 0 { continue; }
+            }
+
+            let vs2_elem = Self::read_elem(&vs2_bytes, byte_offset, sew);
+            let vs1_elem = if let Some(scalar) = vs1_scalar {
+                scalar
+            } else {
+                Self::read_elem(&vs1_bytes, byte_offset, sew)
+            };
+            let vd_orig_elem = if is_macc {
+                Self::read_elem(&vd_orig_bytes, byte_offset, sew)
+            } else {
+                0
+            };
+
+            let result = match op_name {
+                "add" => vs2_elem.wrapping_add(vs1_elem),
+                "sub" => vs2_elem.wrapping_sub(vs1_elem),
+                "mul" => vs2_elem.wrapping_mul(vs1_elem),
+                "div" => {
+                    let a = Self::sign_extend(vs2_elem, sew);
+                    let b = Self::sign_extend(vs1_elem, sew);
+                    if b == 0 { u64::MAX } else if a == i64::MIN && b == -1 { a as u64 } else { a.wrapping_div(b) as u64 }
+                }
+                "divu" => {
+                    if vs1_elem == 0 { u64::MAX } else { vs2_elem.wrapping_div(vs1_elem) }
+                }
+                "rem" => {
+                    let a = Self::sign_extend(vs2_elem, sew);
+                    let b = Self::sign_extend(vs1_elem, sew);
+                    if b == 0 { a as u64 } else if a == i64::MIN && b == -1 { 0 } else { a.wrapping_rem(b) as u64 }
+                }
+                "remu" => {
+                    if vs1_elem == 0 { vs2_elem } else { vs2_elem.wrapping_rem(vs1_elem) }
+                }
+                "min" => {
+                    let a = Self::sign_extend(vs2_elem, sew);
+                    let b = Self::sign_extend(vs1_elem, sew);
+                    a.min(b) as u64
+                }
+                "minu" => vs2_elem.min(vs1_elem),
+                "max" => {
+                    let a = Self::sign_extend(vs2_elem, sew);
+                    let b = Self::sign_extend(vs1_elem, sew);
+                    a.max(b) as u64
+                }
+                "maxu" => vs2_elem.max(vs1_elem),
+                "and" => vs2_elem & vs1_elem,
+                "or" => vs2_elem | vs1_elem,
+                "xor" => vs2_elem ^ vs1_elem,
+                "sll" => vs2_elem.wrapping_shl((vs1_elem & 0x3f) as u32),
+                "srl" => vs2_elem.wrapping_shr((vs1_elem & 0x3f) as u32),
+                "sra" => {
+                    let a = Self::sign_extend(vs2_elem, sew);
+                    let shift = (vs1_elem & 0x3f) as u32;
+                    let sew_bits = (sew * 8) as u32;
+                    if sew_bits >= 64 {
+                        (a.wrapping_shr(shift)) as u64
+                    } else {
+                        ((a.wrapping_shr(shift)) as u64) & ((1u64 << sew_bits) - 1)
+                    }
+                }
+                "seq" => if vs2_elem == vs1_elem { u64::MAX } else { 0 },
+                "slt" => if Self::sign_extend(vs2_elem, sew) < Self::sign_extend(vs1_elem, sew) { u64::MAX } else { 0 },
+                "sle" => if Self::sign_extend(vs2_elem, sew) <= Self::sign_extend(vs1_elem, sew) { u64::MAX } else { 0 },
+                "sltu" => if vs2_elem < vs1_elem { u64::MAX } else { 0 },
+                "sgtu" => if vs2_elem > vs1_elem { u64::MAX } else { 0 },
+                "madd" => vd_orig_elem.wrapping_add(vs1_elem.wrapping_mul(vs2_elem)),
+                "nmsub" => vs1_elem.wrapping_mul(vs2_elem).wrapping_sub(vd_orig_elem),
+                "macc" => vd_orig_elem.wrapping_add(vs1_elem.wrapping_mul(vs2_elem)),
+                "nmacc" => 0u64.wrapping_sub(vd_orig_elem.wrapping_add(vs1_elem.wrapping_mul(vs2_elem))),
+                "merge" | "move" => vs1_elem,
+                _ => return Err(DebuggerError::GeneralError(format!("unsupported vector op: {}", op_name))),
+            };
+
+            Self::write_elem(&mut vd_bytes, byte_offset, sew, result);
+        }
+
+        self.set_vreg_bytes(hart_id, inst.get_r0(), vd_bytes);
+        self.next_pc(hart_id)?;
+        Ok(())
+    }
+
+    /// Execute vector load instructions
+    fn execute_vload(&mut self, hart_id: HartId, inst: &Instruction) -> Result<(), DebuggerError> {
+        let name = inst.get_instruction_name().to_lowercase();
+        let vl = self.get_vl(hart_id);
+        let sew = self.get_elem_width(hart_id, &name);
+
+        if vl == 0 {
+            self.next_pc(hart_id)?;
+            return Ok(());
+        }
+
+        let nfields = if name.contains("vl4r") { 4 }
+            else if name.contains("vl3r") { 3 }
+            else if name.contains("vl2r") { 2 }
+            else { 1 };
+
+        let vd_start_idx = self.vreg(&inst.get_r0().cloned());
+        let base_addr = self.get_x(hart_id, inst.get_r1());
+
+        let is_strided = name.starts_with("vlse");
+        let is_indexed = name.starts_with("vluxei") || name.starts_with("vloxei");
+        let is_segment_whole_reg = name.starts_with("vl1r") || name.starts_with("vl2r")
+            || name.starts_with("vl3r") || name.starts_with("vl4r");
+
+        let stride = if is_strided {
+            self.get_x(hart_id, inst.get_r2())
+        } else {
+            0
+        };
+        let vindex_bytes = if is_indexed {
+            Some(self.get_vreg_bytes(hart_id, inst.get_r2()))
+        } else {
+            None
+        };
+
+        if is_segment_whole_reg {
+            let bytes_per_reg = 64;
+            for field in 0..nfields {
+                let mut vd_bytes = vec![0u8; bytes_per_reg];
+                for b in 0..bytes_per_reg {
+                    let addr = base_addr.wrapping_add((field * bytes_per_reg + b) as u64);
+                    vd_bytes[b] = self.memory.read_u8(addr);
+                }
+                let reg_idx = (vd_start_idx + field) % 32;
+                self.set_vreg_bytes_by_idx(hart_id, reg_idx, vd_bytes);
+            }
+        } else {
+            let mut vd_bytes = vec![0u8; 64];
+
+            for i in 0..vl {
+                let byte_offset = i * sew;
+                if byte_offset + sew > 64 { break; }
+
+                let addr = if is_indexed {
+                    let vindex = vindex_bytes.as_ref().unwrap();
+                    let idx_elem = Self::read_elem(vindex, i * sew, sew);
+                    if name.starts_with("vluxei") {
+                        base_addr.wrapping_add(idx_elem.wrapping_mul(sew as u64))
+                    } else {
+                        base_addr.wrapping_add(idx_elem)
+                    }
+                } else if is_strided {
+                    base_addr.wrapping_add((i as u64).wrapping_mul(stride))
+                } else {
+                    base_addr.wrapping_add((i * sew) as u64)
+                };
+
+                let val = match sew {
+                    1 => self.memory.read_u8(addr) as u64,
+                    2 => self.memory.read_u16(addr) as u64,
+                    4 => self.memory.read_u32(addr) as u64,
+                    8 => self.memory.read_u64(addr),
+                    _ => self.memory.read_u64(addr),
+                };
+
+                Self::write_elem(&mut vd_bytes, byte_offset, sew, val);
+            }
+
+            self.set_vreg_bytes(hart_id, inst.get_r0(), vd_bytes);
+        }
+
+        self.next_pc(hart_id)?;
+        Ok(())
+    }
+
+    /// Execute vector store instructions
+    fn execute_vstore(&mut self, hart_id: HartId, inst: &Instruction) -> Result<(), DebuggerError> {
+        let name = inst.get_instruction_name().to_lowercase();
+        let vl = self.get_vl(hart_id);
+        let sew = self.get_elem_width(hart_id, &name);
+
+        if vl == 0 {
+            self.next_pc(hart_id)?;
+            return Ok(());
+        }
+
+        let nfields = if name.contains("vs4r") { 4 }
+            else if name.contains("vs3r") { 3 }
+            else if name.contains("vs2r") { 2 }
+            else { 1 };
+
+        let vd_start_idx = self.vreg(&inst.get_r0().cloned());
+        let base_addr = self.get_x(hart_id, inst.get_r1());
+
+        let is_strided = name.starts_with("vsse");
+        let is_indexed = name.starts_with("vsuxei") || name.starts_with("vsoxei");
+        let is_segment_whole_reg = name.starts_with("vs1r") || name.starts_with("vs2r")
+            || name.starts_with("vs3r") || name.starts_with("vs4r");
+
+        let stride = if is_strided {
+            self.get_x(hart_id, inst.get_r2())
+        } else {
+            0
+        };
+        let vindex_bytes = if is_indexed {
+            Some(self.get_vreg_bytes(hart_id, inst.get_r2()))
+        } else {
+            None
+        };
+
+        if is_segment_whole_reg {
+            let bytes_per_reg = 64;
+            for field in 0..nfields {
+                let reg_idx = (vd_start_idx + field) % 32;
+                let vs_bytes = self.get_vreg_bytes_by_idx(hart_id, reg_idx);
+                for b in 0..bytes_per_reg {
+                    let addr = base_addr.wrapping_add((field * bytes_per_reg + b) as u64);
+                    self.memory.write_u8(addr, vs_bytes.get(b).copied().unwrap_or(0));
+                }
+            }
+        } else {
+            let vs3_bytes = self.get_vreg_bytes(hart_id, inst.get_r0());
+
+            for i in 0..vl {
+                let byte_offset = i * sew;
+                if byte_offset + sew > 64 { break; }
+
+                let addr = if is_indexed {
+                    let vindex = vindex_bytes.as_ref().unwrap();
+                    let idx_elem = Self::read_elem(vindex, i * sew, sew);
+                    if name.starts_with("vsuxei") {
+                        base_addr.wrapping_add(idx_elem.wrapping_mul(sew as u64))
+                    } else {
+                        base_addr.wrapping_add(idx_elem)
+                    }
+                } else if is_strided {
+                    base_addr.wrapping_add((i as u64).wrapping_mul(stride))
+                } else {
+                    base_addr.wrapping_add((i * sew) as u64)
+                };
+
+                let val = Self::read_elem(&vs3_bytes, byte_offset, sew);
+                match sew {
+                    1 => self.memory.write_u8(addr, val as u8),
+                    2 => self.memory.write_u16(addr, val as u16),
+                    4 => self.memory.write_u32(addr, val as u32),
+                    8 => self.memory.write_u64(addr, val),
+                    _ => {}
+                }
+            }
+        }
+
+        self.next_pc(hart_id)?;
+        Ok(())
+    }
+
+    /// Execute vector reduction instructions
+    fn execute_vreduction(&mut self, hart_id: HartId, inst: &Instruction) -> Result<(), DebuggerError> {
+        let name = inst.get_instruction_name().to_lowercase();
+        let vl = self.get_vl(hart_id);
+        let sew = self.get_elem_width(hart_id, &name);
+        let masked = Self::is_masked(inst);
+
+        if vl == 0 {
+            self.next_pc(hart_id)?;
+            return Ok(());
+        }
+
+        let base_name = name.split('.').next().unwrap_or(&name);
+        let vs2_bytes = self.get_vreg_bytes(hart_id, inst.get_r1());
+        let vs1_bytes = self.get_vreg_bytes(hart_id, inst.get_r2());
+
+        let vs1_elem = Self::read_elem(&vs1_bytes, 0, sew);
+        let mut result = vs1_elem;
+
+        for i in 0..vl {
+            let byte_offset = i * sew;
+            if byte_offset + sew > 64 { break; }
+
+            if masked {
+                let v0_bytes = self.get_vreg_bytes(hart_id, Some(&"v0".to_string()));
+                let mask_byte = v0_bytes.get(byte_offset).copied().unwrap_or(0);
+                if mask_byte & 1 == 0 { continue; }
+            }
+
+            let elem = Self::read_elem(&vs2_bytes, byte_offset, sew);
+
+            result = match base_name {
+                "vredsum" => result.wrapping_add(elem),
+                "vredmin" => {
+                    let a = Self::sign_extend(result, sew);
+                    let b = Self::sign_extend(elem, sew);
+                    a.min(b) as u64
+                }
+                "vredmax" => {
+                    let a = Self::sign_extend(result, sew);
+                    let b = Self::sign_extend(elem, sew);
+                    a.max(b) as u64
+                }
+                _ => result,
+            };
+        }
+
+        let mut vd_bytes = vec![0u8; 64];
+        Self::write_elem(&mut vd_bytes, 0, sew, result);
+        self.set_vreg_bytes(hart_id, inst.get_r0(), vd_bytes);
+        self.next_pc(hart_id)?;
+        Ok(())
+    }
+
+    /// Execute vector mask instructions (vand.mm, vor.mm, vxor.mm, vnot.m)
+    fn execute_vmask(&mut self, hart_id: HartId, inst: &Instruction) -> Result<(), DebuggerError> {
+        let name = inst.get_instruction_name().to_lowercase();
+        let vl = self.get_vl(hart_id);
+
+        if vl == 0 {
+            self.next_pc(hart_id)?;
+            return Ok(());
+        }
+
+        let vs1_bytes = self.get_vreg_bytes(hart_id, inst.get_r1());
+        let vs2_bytes = if name.starts_with("vnot") {
+            None
+        } else {
+            Some(self.get_vreg_bytes(hart_id, inst.get_r2()))
+        };
+
+        let base_name = name.split('.').next().unwrap_or(&name);
+        let mut vd_bytes = vec![0u8; 64];
+
+        for i in 0..64 {
+            let vs1_byte = vs1_bytes.get(i).copied().unwrap_or(0);
+            let vs2_byte = vs2_bytes.as_ref().map(|v| v.get(i).copied().unwrap_or(0)).unwrap_or(0);
+
+            let result_byte = match base_name {
+                "vand" => vs1_byte & vs2_byte,
+                "vor" => vs1_byte | vs2_byte,
+                "vxor" => vs1_byte ^ vs2_byte,
+                "vnot" => !vs1_byte,
+                _ => vs1_byte,
+            };
+
+            if i < vd_bytes.len() {
+                vd_bytes[i] = result_byte;
+            }
+        }
+
+        self.set_vreg_bytes(hart_id, inst.get_r0(), vd_bytes);
+        self.next_pc(hart_id)?;
+        Ok(())
+    }
+
+    /// Read element from byte slice at given offset with given size
+    fn read_elem(bytes: &[u8], offset: usize, size: usize) -> u64 {
+        let mut val: u64 = 0;
+        for b in 0..size {
+            if offset + b < bytes.len() {
+                val |= (bytes[offset + b] as u64) << (b * 8);
+            }
+        }
+        val
+    }
+
+    /// Sign-extend a u64 value based on element size in bytes
+    fn sign_extend(value: u64, sew_bytes: usize) -> i64 {
+        if sew_bytes >= 8 {
+            return value as i64;
+        }
+        let bits = (sew_bytes * 8) as u32;
+        let sign_bit = 1u64 << (bits - 1);
+        if value & sign_bit != 0 {
+            (value | (u64::MAX << bits)) as i64
+        } else {
+            value as i64
+        }
+    }
+
+    /// Write element to byte slice at given offset with given size
+    fn write_elem(bytes: &mut [u8], offset: usize, size: usize, value: u64) {
+        for b in 0..size {
+            if offset + b < bytes.len() {
+                bytes[offset + b] = ((value >> (b * 8)) & 0xFF) as u8;
+            }
+        }
+    }
+
     fn execute_inst(&mut self, hart_id: HartId, inst: &Instruction) -> Result<(), DebuggerError> {
+        // Check if this is a vector instruction (name starts with 'v')
+        let name = inst.get_instruction_name();
+        if name.to_lowercase().starts_with('v') {
+            return self.execute_vector_inst(hart_id, inst);
+        }
+
         let opcode = inst.get_op_code()
                     .map_err(|x| DebuggerError::GeneralError(x.get_error_message()))?;
 
