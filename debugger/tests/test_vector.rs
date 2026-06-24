@@ -141,6 +141,58 @@ main:
     assert_eq!(get_reg(&m, "t0"), 0);
 }
 
+#[test]
+fn test_vsetvli_avl_exceeds_vlmax() {
+    // VLEN=512 bits=64 bytes, e8,m1 => VLMAX = 64/1*1 = 64
+    // Request AVL=1000, VL should be capped at 64
+    let asm = r#"
+.text
+main:
+    vsetvli t0, t1, e8,m1,ta,ma
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 1000u64);
+    step(&mut m);
+    assert_eq!(get_reg(&m, "t0"), 64); // capped at VLMAX
+    let hart = m.get_default_hart().unwrap();
+    assert_eq!(hart.csr.vl, 64);
+    // vtype: e8(sew=0), m1(lmul=0), ta=1, ma=1 => 0b1100_0000 = 0xC0
+    assert_eq!(hart.csr.vtype, 0xC0);
+}
+
+#[test]
+fn test_vsetvli_avl_within_vlmax() {
+    // VLEN=512 bits=64 bytes, e32,m1 => VLMAX = 64/4*1 = 16
+    // Request AVL=4, VL should be 4
+    let asm = r#"
+.text
+main:
+    vsetvli t0, t1, e32,m1,ta,ma
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 4u64);
+    step(&mut m);
+    assert_eq!(get_reg(&m, "t0"), 4);
+}
+
+#[test]
+fn test_vsetvli_avl_exceeds_vlmax_x0_dest() {
+    // When rd=x0, result is not written to any GPR (x0 always 0)
+    let asm = r#"
+.text
+main:
+    vsetvli x0, t1, e8,m1,ta,ma
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 1000u64);
+    step(&mut m);
+    // x0 should always be 0
+    assert_eq!(get_reg(&m, "x0"), 0);
+    // VL should still be set to VLMAX
+    let hart = m.get_default_hart().unwrap();
+    assert_eq!(hart.csr.vl, 64);
+}
+
 // ============================================================
 // vadd tests
 // ============================================================

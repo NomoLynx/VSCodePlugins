@@ -160,6 +160,21 @@ main:
 }
 
 #[test]
+fn test_div_by_zero_x0_dest() {
+    // div x0, x1, x0: divisor x0 = 0, destination x0 (should stay 0)
+    let asm = r#"
+.text
+main:
+    div x0, x1, x0
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "x1", 100u64);
+    step(&mut m);
+    // x0 should always remain 0
+    assert_eq!(get_reg(&m, "x0"), 0);
+}
+
+#[test]
 fn test_div_overflow() {
     // i64::MIN / -1 overflows => returns i64::MIN
     let asm = r#"
@@ -2532,8 +2547,8 @@ main:
 
 #[test]
 fn test_aes64ks1i_rcon1() {
-    // aes64ks1i: SubWord(RotWord(w1)) ^ rcon, w1=0, rcon=1
-    // SubWord(0) = 0x63636363, XOR rcon in MSB: 0x62_636363
+    // aes64ks1i: SubWord(RotWord(w1)) ^ RCON[rcon], w1=0, rcon=1
+    // SubWord(0) = 0x63636363, RCON[1]=0x02, XOR in MSB: 0x61_636363
     let asm = r#"
 .text
 main:
@@ -2542,12 +2557,12 @@ main:
     let mut m = setup_machine(asm);
     set_reg(&mut m, "t1", 0x0000000000000000u64);
     step(&mut m);
-    assert_eq!(get_reg(&m, "t0"), 0x62636363u64);
+    assert_eq!(get_reg(&m, "t0"), 0x61636363u64);
 }
 
 #[test]
 fn test_aes64ks1i_rcon5() {
-    // aes64ks1i with rcon=5: SubWord(0)=0x63636363, XOR rcon=5 in MSB -> 0x66_636363
+    // aes64ks1i with rcon=5: SubWord(0)=0x63636363, RCON[5]=0x20, XOR in MSB -> 0x43_636363
     let asm = r#"
 .text
 main:
@@ -2556,7 +2571,7 @@ main:
     let mut m = setup_machine(asm);
     set_reg(&mut m, "t1", 0x0000000000000000u64);
     step(&mut m);
-    assert_eq!(get_reg(&m, "t0"), 0x66636363u64);
+    assert_eq!(get_reg(&m, "t0"), 0x43636363u64);
 }
 
 #[test]

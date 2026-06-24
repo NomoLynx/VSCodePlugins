@@ -172,9 +172,9 @@ fn aes64_ks1i(rs1: u64, rcon: u32) -> u64 {
         let byte = ((rotated >> (i * 8)) & 0xFF) as u8;
         subbed |= (AES_SBOX[byte as usize] as u32) << (i * 8);
     }
-    // XOR rcon into top byte (byte 3)
-    let rcon_masked = (rcon & 0xFF) as u32;
-    subbed ^= rcon_masked << 24;
+    // Look up actual RCON value from table, XOR into top byte (byte 3)
+    let rcon_val = AES_RCON.get(rcon as usize).copied().unwrap_or(0);
+    subbed ^= (rcon_val as u32) << 24;
     // Return result sign-extended from 32 bits
     subbed as i32 as i64 as u64
 }
@@ -653,17 +653,42 @@ impl Machine {
             (avl, vtypei)
         };
 
-        let vl = {
-            let hart = self.get_hart_mut(hart_id).unwrap();
-            hart.csr.vl = avl as u64;
-            hart.csr.vtype = vtypei;
-            hart.vector_state.vl = avl;
-            hart.vector_state.sew = 1 << (((vtypei >> 3) & 0x7) as usize);
-            hart.vector_state.lmul = 1;
-            avl as u64
+        // Compute VLMAX = (VLEN / SEW) * LMUL
+        // VLEN = 512 bits = 64 bytes (VectorRegister has 64 bytes)
+        let vlen_bytes = 64;
+        let sew_enc = ((vtypei >> 3) & 0x7) as usize;
+        // SEW encoding: 0=e8(1byte), 1=e16(2bytes), 2=e32(4bytes), 3=e64(8bytes)
+        let sew_bytes = 1 << sew_enc;
+        let lmul_enc = (vtypei & 0x7) as usize;
+        let lmul = match lmul_enc {
+            0 => 1,   // m1
+            1 => 2,   // m2
+            2 => 4,   // m4
+            3 => 8,   // m8
+            5 => 1,   // mf8 -> 1/8, but we treat as 1 for now (fractional LMUL)
+            6 => 1,   // mf4 -> 1/4
+            7 => 1,   // mf2 -> 1/2
+            _ => 1,
+        };
+        let vlmax = (vlen_bytes / sew_bytes) * lmul;
+
+        let vl = if avl > vlmax {
+            vlmax
+        } else {
+            avl
         };
 
-        self.set_x(hart_id, inst.get_r0(), vl);
+        {
+            let hart = self.get_hart_mut(hart_id).unwrap();
+            hart.csr.vl = vl as u64;
+            hart.csr.vtype = vtypei;
+            hart.vector_state.vl = vl;
+            hart.vector_state.sew = sew_bytes;
+            hart.vector_state.lmul = lmul;
+            hart.csr.vlenb = vlen_bytes as u64;
+        }
+
+        self.set_x(hart_id, inst.get_r0(), vl as u64);
         self.next_pc(hart_id)?;
         Ok(())
     }
@@ -819,12 +844,21 @@ impl Machine {
                 "and" => vs2_elem & vs1_elem,
                 "or" => vs2_elem | vs1_elem,
                 "xor" => vs2_elem ^ vs1_elem,
-                "sll" => vs2_elem.wrapping_shl((vs1_elem & 0x3f) as u32),
-                "srl" => vs2_elem.wrapping_shr((vs1_elem & 0x3f) as u32),
+                "sll" => {
+                    let sew_bits = sew * 8;
+                    let shamt_mask = (sew_bits - 1) as u64;
+                    vs2_elem.wrapping_shl((vs1_elem & shamt_mask) as u32)
+                }
+                "srl" => {
+                    let sew_bits = sew * 8;
+                    let shamt_mask = (sew_bits - 1) as u64;
+                    vs2_elem.wrapping_shr((vs1_elem & shamt_mask) as u32)
+                }
                 "sra" => {
                     let a = Self::sign_extend(vs2_elem, sew);
-                    let shift = (vs1_elem & 0x3f) as u32;
-                    let sew_bits = (sew * 8) as u32;
+                    let sew_bits = sew * 8;
+                    let shamt_mask = (sew_bits - 1) as u64;
+                    let shift = (vs1_elem & shamt_mask) as u32;
                     if sew_bits >= 64 {
                         (a.wrapping_shr(shift)) as u64
                     } else {
@@ -908,11 +942,9 @@ impl Machine {
                 let addr = if is_indexed {
                     let vindex = vindex_bytes.as_ref().unwrap();
                     let idx_elem = Self::read_elem(vindex, i * sew, sew);
-                    if name.starts_with("vluxei") {
-                        base_addr.wrapping_add(idx_elem.wrapping_mul(sew as u64))
-                    } else {
-                        base_addr.wrapping_add(idx_elem)
-                    }
+                    // RISC-V spec: indexed load/store uses the index value directly
+                    // as a byte offset (both ordered and unordered variants)
+                    base_addr.wrapping_add(idx_elem)
                 } else if is_strided {
                     base_addr.wrapping_add((i as u64).wrapping_mul(stride))
                 } else {
@@ -992,11 +1024,9 @@ impl Machine {
                 let addr = if is_indexed {
                     let vindex = vindex_bytes.as_ref().unwrap();
                     let idx_elem = Self::read_elem(vindex, i * sew, sew);
-                    if name.starts_with("vsuxei") {
-                        base_addr.wrapping_add(idx_elem.wrapping_mul(sew as u64))
-                    } else {
-                        base_addr.wrapping_add(idx_elem)
-                    }
+                    // RISC-V spec: indexed load/store uses the index value directly
+                    // as a byte offset (both ordered and unordered variants)
+                    base_addr.wrapping_add(idx_elem)
                 } else if is_strided {
                     base_addr.wrapping_add((i as u64).wrapping_mul(stride))
                 } else {
@@ -1161,7 +1191,17 @@ impl Machine {
         match opcode {
             OpCode::Add => self.binary_operation(hart_id, &inst, u64::wrapping_add)?,
             OpCode::Sub => self.binary_operation(hart_id, &inst, u64::wrapping_sub)?,
-            OpCode::And => self.binary_operation(hart_id, &inst, |a, b| a & b)?,
+            OpCode::And => {
+                // C.AND maps to And with r0=rd, r1=rs2, r2=None. Regular and uses r1,r2.
+                if inst.get_r2().is_none() {
+                    let lhs = self.get_x(hart_id, inst.get_r0());
+                    let rhs = self.get_x(hart_id, inst.get_r1());
+                    self.set_x(hart_id, inst.get_r0(), lhs & rhs);
+                    self.next_pc(hart_id)?;
+                } else {
+                    self.binary_operation(hart_id, &inst, |a, b| a & b)?;
+                }
+            }
             OpCode::Or  => self.binary_operation(hart_id, &inst, |a, b| a | b)?,
             OpCode::Xor => self.binary_operation(hart_id, &inst, |a, b| a ^ b)?,
             OpCode::Sll => self.binary_operation(hart_id, &inst, |a, b| a << (b & 0x3f) as u32)?,
@@ -1651,8 +1691,17 @@ impl Machine {
                 self.next_pc(hart_id)?;
             }
             OpCode::Addw => {
-                let lhs = self.get_x(hart_id, inst.get_r1());
-                let rhs = self.get_x(hart_id, inst.get_r2());
+                // C.ADDW maps to Addw with r0=rd, r1=rs2, r2=None. Regular addw uses r1,r2.
+                let lhs = if inst.get_r2().is_none() {
+                    self.get_x(hart_id, inst.get_r0())
+                } else {
+                    self.get_x(hart_id, inst.get_r1())
+                };
+                let rhs = if inst.get_r2().is_none() {
+                    self.get_x(hart_id, inst.get_r1())
+                } else {
+                    self.get_x(hart_id, inst.get_r2())
+                };
 
                 self.set_x(
                     hart_id,
@@ -2064,8 +2113,8 @@ impl Machine {
                 }
             }
             OpCode::Blt => {
-                let lhs = self.get_x(hart_id, inst.get_r0());
-                let rhs = self.get_x(hart_id, inst.get_r1());
+                let lhs = self.get_x(hart_id, inst.get_r0()) as i64;
+                let rhs = self.get_x(hart_id, inst.get_r1()) as i64;
 
                 if lhs < rhs {
                     self.set_pc(hart_id,  self.get_inst_target(hart_id))?;
@@ -2074,8 +2123,8 @@ impl Machine {
                 }
             }
             OpCode::Bge => {
-                let lhs = self.get_x(hart_id, inst.get_r0());
-                let rhs = self.get_x(hart_id, inst.get_r1());
+                let lhs = self.get_x(hart_id, inst.get_r0()) as i64;
+                let rhs = self.get_x(hart_id, inst.get_r1()) as i64;
 
                 if lhs >= rhs {
                     self.set_pc(hart_id,  self.get_inst_target(hart_id))?;
@@ -2328,6 +2377,11 @@ impl Machine {
                 self.set_f32(hart_id, inst.get_r0(), val);
                 self.next_pc(hart_id)?;
             }
+            // NOTE: Floating-point to integer conversions (Fcvtws, Fcvtwd, Fcvtls, Fcvtld, etc.)
+            // use Rust's `as` operator which truncates toward zero (RTZ). The RISC-V spec
+            // requires honoring the FCSR.frm field (default: RNE, round-to-nearest-even).
+            // This simulator currently only supports RTZ mode. Programs relying on other
+            // rounding modes (RNE, RUP, RDN, RMM) may produce incorrect results.
             OpCode::Fcvtws => {
                 let val = self.get_f32(hart_id, inst.get_r1()) as i32 as i64 as u64;
                 self.set_x(hart_id, inst.get_r0(), val);
@@ -2875,10 +2929,11 @@ impl Machine {
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.LWSP: Load word from stack pointer (x2 + offset)
+            // PEG: rd, imm → r0=rd, r1=None. Must use sp (x2) as base.
             OpCode::Clwsp => {
-                let base = self.get_x(hart_id, inst.get_r1());
+                let sp = self.get_hart(hart_id).unwrap().x.regs[2].value;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
-                let addr = base.wrapping_add(imm);
+                let addr = sp.wrapping_add(imm);
                 let val = self.memory.read_u32(addr) as i32 as i64 as u64;
                 self.set_x(hart_id, inst.get_r0(), val);
                 self.next_pc_by(hart_id, 2)?;
@@ -2893,10 +2948,11 @@ impl Machine {
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.LDSP: Load doubleword from stack pointer
+            // PEG: rd, imm → r0=rd, r1=None. Must use sp (x2) as base.
             OpCode::Cldsp => {
-                let base = self.get_x(hart_id, inst.get_r1());
+                let sp = self.get_hart(hart_id).unwrap().x.regs[2].value;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
-                let addr = base.wrapping_add(imm);
+                let addr = sp.wrapping_add(imm);
                 let val = self.memory.read_u64(addr);
                 self.set_x(hart_id, inst.get_r0(), val);
                 self.next_pc_by(hart_id, 2)?;
@@ -2911,64 +2967,71 @@ impl Machine {
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.LQSP: Load quadword from stack pointer - simplified
+            // PEG: rd, imm → r0=rd, r1=None. Must use sp (x2) as base.
             OpCode::Clqsp => {
-                let base = self.get_x(hart_id, inst.get_r1());
+                let sp = self.get_hart(hart_id).unwrap().x.regs[2].value;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
-                let addr = base.wrapping_add(imm);
+                let addr = sp.wrapping_add(imm);
                 let val = self.memory.read_u64(addr);
                 self.set_x(hart_id, inst.get_r0(), val);
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.SW: Store word to memory
+            // PEG: c.sw rs1, rs2, imm → r0=rs1(base), r1=rs2(value)
             OpCode::Csw => {
-                let base = self.get_x(hart_id, inst.get_r1());
+                let base = self.get_x(hart_id, inst.get_r0());
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
                 let addr = base.wrapping_add(imm);
-                let val = self.get_x(hart_id, inst.get_r0()) as u32;
+                let val = self.get_x(hart_id, inst.get_r1()) as u32;
                 self.memory.write_u32(addr, val);
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.SWSP: Store word to stack pointer
+            // PEG: rs2, imm → r0=rs2, r1=None. Must use sp (x2) as base.
             OpCode::Cswsp => {
-                let base = self.get_x(hart_id, inst.get_r1());
+                let sp = self.get_hart(hart_id).unwrap().x.regs[2].value;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
-                let addr = base.wrapping_add(imm);
+                let addr = sp.wrapping_add(imm);
                 let val = self.get_x(hart_id, inst.get_r0()) as u32;
                 self.memory.write_u32(addr, val);
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.SD: Store doubleword to memory
+            // PEG: c.sd rs1, rs2, imm → r0=rs1(base), r1=rs2(value)
             OpCode::Csd => {
-                let base = self.get_x(hart_id, inst.get_r1());
+                let base = self.get_x(hart_id, inst.get_r0());
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
                 let addr = base.wrapping_add(imm);
-                let val = self.get_x(hart_id, inst.get_r0());
+                let val = self.get_x(hart_id, inst.get_r1());
                 self.memory.write_u64(addr, val);
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.SDSP: Store doubleword to stack pointer
+            // PEG: rs2, imm → r0=rs2, r1=None. Must use sp (x2) as base.
             OpCode::Csdsp => {
-                let base = self.get_x(hart_id, inst.get_r1());
+                let sp = self.get_hart(hart_id).unwrap().x.regs[2].value;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
-                let addr = base.wrapping_add(imm);
+                let addr = sp.wrapping_add(imm);
                 let val = self.get_x(hart_id, inst.get_r0());
                 self.memory.write_u64(addr, val);
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.SQ: Store quadword - simplified to store 64 bits
+            // PEG: c.sq rs1, rs2, imm → r0=rs1(base), r1=rs2(value)
             OpCode::Csq => {
-                let base = self.get_x(hart_id, inst.get_r1());
+                let base = self.get_x(hart_id, inst.get_r0());
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
                 let addr = base.wrapping_add(imm);
-                let val = self.get_x(hart_id, inst.get_r0());
+                let val = self.get_x(hart_id, inst.get_r1());
                 self.memory.write_u64(addr, val);
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.SQSP: Store quadword to stack pointer - simplified
+            // PEG: rs2, imm → r0=rs2, r1=None. Must use sp (x2) as base.
             OpCode::Csqsp => {
-                let base = self.get_x(hart_id, inst.get_r1());
+                let sp = self.get_hart(hart_id).unwrap().x.regs[2].value;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
-                let addr = base.wrapping_add(imm);
+                let addr = sp.wrapping_add(imm);
                 let val = self.get_x(hart_id, inst.get_r0());
                 self.memory.write_u64(addr, val);
                 self.next_pc_by(hart_id, 2)?;
@@ -2983,10 +3046,11 @@ impl Machine {
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.FLWSP: Load float from stack pointer
+            // PEG: rd, imm → r0=rd, r1=None. Must use sp (x2) as base.
             OpCode::Cflwsp => {
-                let base = self.get_x(hart_id, inst.get_r1());
+                let sp = self.get_hart(hart_id).unwrap().x.regs[2].value;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
-                let addr = base.wrapping_add(imm);
+                let addr = sp.wrapping_add(imm);
                 let val = self.memory.read_u32(addr);
                 self.set_f32(hart_id, inst.get_r0(), f32::from_bits(val));
                 self.next_pc_by(hart_id, 2)?;
@@ -3001,10 +3065,11 @@ impl Machine {
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.FLDSP: Load double from stack pointer
+            // PEG: rd, imm → r0=rd, r1=None. Must use sp (x2) as base.
             OpCode::Cfldsp => {
-                let base = self.get_x(hart_id, inst.get_r1());
+                let sp = self.get_hart(hart_id).unwrap().x.regs[2].value;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
-                let addr = base.wrapping_add(imm);
+                let addr = sp.wrapping_add(imm);
                 let val = self.memory.read_u64(addr);
                 self.set_f(hart_id, inst.get_r0(), f64::from_bits(val));
                 self.next_pc_by(hart_id, 2)?;
@@ -3019,10 +3084,11 @@ impl Machine {
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.FSWSP: Store float to stack pointer
+            // PEG: rs2, imm → r0=rs2, r1=None. Must use sp (x2) as base.
             OpCode::Cfswsp => {
-                let base = self.get_x(hart_id, inst.get_r1());
+                let sp = self.get_hart(hart_id).unwrap().x.regs[2].value;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
-                let addr = base.wrapping_add(imm);
+                let addr = sp.wrapping_add(imm);
                 let val = self.get_f32(hart_id, inst.get_r0());
                 self.memory.write_u32(addr, val.to_bits());
                 self.next_pc_by(hart_id, 2)?;
@@ -3037,41 +3103,47 @@ impl Machine {
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.FSDSP: Store double to stack pointer
+            // PEG: rs2, imm → r0=rs2, r1=None. Must use sp (x2) as base.
             OpCode::Cfsdsp => {
-                let base = self.get_x(hart_id, inst.get_r1());
+                let sp = self.get_hart(hart_id).unwrap().x.regs[2].value;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
-                let addr = base.wrapping_add(imm);
+                let addr = sp.wrapping_add(imm);
                 let val = self.get_f(hart_id, inst.get_r0());
                 self.memory.write_u64(addr, val.to_bits());
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.ADDI4SPN: Add immediate * 4 to sp, store in rd
+            // PEG: rd, imm → r0=rd, r1=None. Must use sp (x2).
             OpCode::Caddi4spn => {
-                let sp_val = self.get_x(hart_id, inst.get_r1());
+                let sp_val = self.get_hart(hart_id).unwrap().x.regs[2].value;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
                 self.set_x(hart_id, inst.get_r0(), sp_val.wrapping_add(imm));
                 self.next_pc_by(hart_id, 2)?;
             }
-            // C.ADDI: Add immediate to rs1, store in rd
+            // C.ADDI: Add immediate (rd = rd + imm). PEG: rd, imm → r0=rd, r1=None→x0.
+            // Note: c.addi x0, imm is c.nop (handled separately).
             OpCode::Caddi => {
-                let rs1 = self.get_x(hart_id, inst.get_r1());
-                let imm = self.get_u64_from_imm(hart_id, inst.get_imm());
-                self.set_x(hart_id, inst.get_r0(), rs1.wrapping_add(imm));
+                let rd_val = self.get_x(hart_id, inst.get_r0());
+                let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
+                self.set_x(hart_id, inst.get_r0(), (rd_val as i64).wrapping_add(imm) as u64);
                 self.next_pc_by(hart_id, 2)?;
             }
-            // C.ADDIW: Add word immediate
+            // C.ADDIW: Add word immediate (rd = (rd as i32) + imm). PEG: rd, imm → r0=rd, r1=None→x0.
             OpCode::Caddiw => {
-                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let rd_val = self.get_x(hart_id, inst.get_r0());
                 let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
-                let result = (rs1 as i32).wrapping_add(imm as i32) as i64 as u64;
+                let result = (rd_val as i32).wrapping_add(imm as i32) as i64 as u64;
                 self.set_x(hart_id, inst.get_r0(), result);
                 self.next_pc_by(hart_id, 2)?;
             }
-            // C.ADDI16SP: Add immediate * 16 to sp
+            // C.ADDI16SP: Add immediate * 16 to sp. PEG: c.addi16sp x0, imm → r0=x0, r1=None.
+            // Must use sp (x2) as both source and destination.
             OpCode::Caddi16sp => {
-                let sp_val = self.get_x(hart_id, inst.get_r1());
+                let sp_val = self.get_hart(hart_id).unwrap().x.regs[2].value;
                 let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
-                self.set_x(hart_id, inst.get_r0(), (sp_val as i64).wrapping_add(imm) as u64);
+                let result = (sp_val as i64).wrapping_add(imm) as u64;
+                let hart = self.get_hart_mut(hart_id).unwrap();
+                hart.x.regs[2].value = result;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.LI: Load immediate (rd = imm, rs1 = x0)
@@ -3080,121 +3152,123 @@ impl Machine {
                 self.set_x(hart_id, inst.get_r0(), imm as u64);
                 self.next_pc_by(hart_id, 2)?;
             }
-            // C.LUI: Load upper immediate
+            // C.LUI: Load upper immediate (imm is already shifted by PEG: create_compact_inc_from_current with bits 17..12)
             OpCode::Clui => {
                 let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
-                self.set_x(hart_id, inst.get_r0(), imm as u64);
+                // PEG stores the raw imm value; lui shifts left by 12
+                self.set_x(hart_id, inst.get_r0(), ((imm as i64) << 12) as u64);
                 self.next_pc_by(hart_id, 2)?;
             }
-            // C.SLLI: Shift left logical immediate (RV32)
+            // C.SLLI: Shift left logical immediate (RV32). PEG: rd, shamt → r0=rd, r1=None→x0.
+            // Semantics: rd = rd << shamt, so use r0 as source.
             OpCode::Cslli => {
-                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let rd_val = self.get_x(hart_id, inst.get_r0());
                 let shamt = self.get_u64_from_imm(hart_id, inst.get_imm()) & 0x1F;
-                self.set_x(hart_id, inst.get_r0(), rs1 << shamt);
+                self.set_x(hart_id, inst.get_r0(), rd_val << shamt);
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.SLLI64: Shift left logical immediate (RV64)
             OpCode::Cslli64 => {
-                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let rd_val = self.get_x(hart_id, inst.get_r0());
                 let shamt = self.get_u64_from_imm(hart_id, inst.get_imm()) & 0x3F;
-                self.set_x(hart_id, inst.get_r0(), rs1 << shamt);
+                self.set_x(hart_id, inst.get_r0(), rd_val << shamt);
                 self.next_pc_by(hart_id, 2)?;
             }
-            // C.SRLI: Shift right logical immediate
+            // C.SRLI: Shift right logical immediate. PEG: rd, shamt → r0=rd.
             OpCode::Csrli => {
-                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let rd_val = self.get_x(hart_id, inst.get_r0());
                 let shamt = self.get_u64_from_imm(hart_id, inst.get_imm()) & 0x1F;
-                self.set_x(hart_id, inst.get_r0(), rs1 >> shamt);
+                self.set_x(hart_id, inst.get_r0(), rd_val >> shamt);
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.SRLI64: Shift right logical immediate (RV64)
             OpCode::Csrli64 => {
-                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let rd_val = self.get_x(hart_id, inst.get_r0());
                 let shamt = self.get_u64_from_imm(hart_id, inst.get_imm()) & 0x3F;
-                self.set_x(hart_id, inst.get_r0(), rs1 >> shamt);
+                self.set_x(hart_id, inst.get_r0(), rd_val >> shamt);
                 self.next_pc_by(hart_id, 2)?;
             }
-            // C.SRAI: Shift right arithmetic immediate
+            // C.SRAI: Shift right arithmetic immediate. PEG: rd, shamt → r0=rd.
             OpCode::Csrai => {
-                let rs1 = self.get_x(hart_id, inst.get_r1()) as i32 as i64;
+                let rd_val = self.get_x(hart_id, inst.get_r0()) as i32 as i64;
                 let shamt = self.get_u64_from_imm(hart_id, inst.get_imm()) & 0x1F;
-                self.set_x(hart_id, inst.get_r0(), (rs1 >> shamt) as u64);
+                self.set_x(hart_id, inst.get_r0(), (rd_val >> shamt) as u64);
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.SRAI64: Shift right arithmetic immediate (RV64)
             OpCode::Csrai64 => {
-                let rs1 = self.get_x(hart_id, inst.get_r1()) as i64;
+                let rd_val = self.get_x(hart_id, inst.get_r0()) as i64;
                 let shamt = self.get_u64_from_imm(hart_id, inst.get_imm()) & 0x3F;
-                self.set_x(hart_id, inst.get_r0(), (rs1 >> shamt) as u64);
+                self.set_x(hart_id, inst.get_r0(), (rd_val >> shamt) as u64);
                 self.next_pc_by(hart_id, 2)?;
             }
-            // C.ANDI: And immediate
+            // C.ANDI: And immediate (rd = rd & imm). PEG: rd, imm → r0=rd, r1=None→x0.
             OpCode::Candi => {
-                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let rd_val = self.get_x(hart_id, inst.get_r0());
                 let imm = self.get_i64_from_imm(hart_id, inst.get_imm());
-                self.set_x(hart_id, inst.get_r0(), rs1 & (imm as u64));
+                self.set_x(hart_id, inst.get_r0(), rd_val & (imm as u64));
                 self.next_pc_by(hart_id, 2)?;
             }
-            // C.MV: Move (rd = rs2, rs1 is x0)
+            // C.MV: Move (rd = rs2). PEG: rd, rs1 → r0=rd, r1=rs2
             OpCode::Cmv => {
-                let rs2 = self.get_x(hart_id, inst.get_r2());
+                let rs2 = self.get_x(hart_id, inst.get_r1());
                 self.set_x(hart_id, inst.get_r0(), rs2);
                 self.next_pc_by(hart_id, 2)?;
             }
-            // C.ADD: Add (rd = rd + rs2)
+            // C.ADD: Add (rd = rd + rs2). PEG: rd, rs1 → r0=rd, r1=rs2
             OpCode::Cadd => {
-                let rs1 = self.get_x(hart_id, inst.get_r1());
-                let rs2 = self.get_x(hart_id, inst.get_r2());
-                self.set_x(hart_id, inst.get_r0(), rs1.wrapping_add(rs2));
+                let rd_val = self.get_x(hart_id, inst.get_r0());
+                let rs2 = self.get_x(hart_id, inst.get_r1());
+                self.set_x(hart_id, inst.get_r0(), rd_val.wrapping_add(rs2));
                 self.next_pc_by(hart_id, 2)?;
             }
-            // C.ADDW: Add word
+            // C.ADDW: Add word (rd = rd + rs2). PEG: rd, rs1 → r0=rd, r1=rs2
             OpCode::Caddw => {
-                let rs1 = self.get_x(hart_id, inst.get_r1()) as i32;
-                let rs2 = self.get_x(hart_id, inst.get_r2()) as i32;
-                let result = rs1.wrapping_add(rs2) as i64 as u64;
+                let rd_val = self.get_x(hart_id, inst.get_r0()) as i32;
+                let rs2 = self.get_x(hart_id, inst.get_r1()) as i32;
+                let result = rd_val.wrapping_add(rs2) as i64 as u64;
                 self.set_x(hart_id, inst.get_r0(), result);
                 self.next_pc_by(hart_id, 2)?;
             }
-            // C.SUB: Subtract
+            // C.SUB: Subtract (rd = rd - rs2). PEG: rd, rs1 → r0=rd, r1=rs2
             OpCode::Csub => {
-                let rs1 = self.get_x(hart_id, inst.get_r1());
-                let rs2 = self.get_x(hart_id, inst.get_r2());
-                self.set_x(hart_id, inst.get_r0(), rs1.wrapping_sub(rs2));
+                let rd_val = self.get_x(hart_id, inst.get_r0());
+                let rs2 = self.get_x(hart_id, inst.get_r1());
+                self.set_x(hart_id, inst.get_r0(), rd_val.wrapping_sub(rs2));
                 self.next_pc_by(hart_id, 2)?;
             }
-            // C.SUBW: Subtract word
+            // C.SUBW: Subtract word (rd = rd - rs2). PEG: rd, rs1 → r0=rd, r1=rs2
             OpCode::Csubw => {
-                let rs1 = self.get_x(hart_id, inst.get_r1()) as i32;
-                let rs2 = self.get_x(hart_id, inst.get_r2()) as i32;
-                let result = rs1.wrapping_sub(rs2) as i64 as u64;
+                let rd_val = self.get_x(hart_id, inst.get_r0()) as i32;
+                let rs2 = self.get_x(hart_id, inst.get_r1()) as i32;
+                let result = rd_val.wrapping_sub(rs2) as i64 as u64;
                 self.set_x(hart_id, inst.get_r0(), result);
                 self.next_pc_by(hart_id, 2)?;
             }
-            // C.XOR: XOR
+            // C.XOR: XOR (rd = rd ^ rs2). PEG: rd, rs1 → r0=rd, r1=rs2
             OpCode::Cxor => {
-                let rs1 = self.get_x(hart_id, inst.get_r1());
-                let rs2 = self.get_x(hart_id, inst.get_r2());
-                self.set_x(hart_id, inst.get_r0(), rs1 ^ rs2);
+                let rd_val = self.get_x(hart_id, inst.get_r0());
+                let rs2 = self.get_x(hart_id, inst.get_r1());
+                self.set_x(hart_id, inst.get_r0(), rd_val ^ rs2);
                 self.next_pc_by(hart_id, 2)?;
             }
-            // C.OR: OR
+            // C.OR: OR (rd = rd | rs2). PEG: rd, rs1 → r0=rd, r1=rs2
             OpCode::Cor => {
-                let rs1 = self.get_x(hart_id, inst.get_r1());
-                let rs2 = self.get_x(hart_id, inst.get_r2());
-                self.set_x(hart_id, inst.get_r0(), rs1 | rs2);
+                let rd_val = self.get_x(hart_id, inst.get_r0());
+                let rs2 = self.get_x(hart_id, inst.get_r1());
+                self.set_x(hart_id, inst.get_r0(), rd_val | rs2);
                 self.next_pc_by(hart_id, 2)?;
             }
-            // C.AND: AND
+            // C.AND: AND (rd = rd & rs2). PEG: rd, rs1 → r0=rd, r1=rs2
             OpCode::Cand => {
-                let rs1 = self.get_x(hart_id, inst.get_r1());
-                let rs2 = self.get_x(hart_id, inst.get_r2());
-                self.set_x(hart_id, inst.get_r0(), rs1 & rs2);
+                let rd_val = self.get_x(hart_id, inst.get_r0());
+                let rs2 = self.get_x(hart_id, inst.get_r1());
+                self.set_x(hart_id, inst.get_r0(), rd_val & rs2);
                 self.next_pc_by(hart_id, 2)?;
             }
-            // C.BEQZ: Branch if equal to zero
+            // C.BEQZ: Branch if equal to zero. PEG: rs1, imm → r0=rs1, r1=None.
             OpCode::Cbeqz => {
-                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let rs1 = self.get_x(hart_id, inst.get_r0());
                 if rs1 == 0 {
                     let offset = self.get_i64_from_imm(hart_id, inst.get_imm());
                     let hart = self.get_hart_mut(hart_id).unwrap();
@@ -3203,9 +3277,9 @@ impl Machine {
                     self.next_pc_by(hart_id, 2)?;
                 }
             }
-            // C.BNEZ: Branch if not equal to zero
+            // C.BNEZ: Branch if not equal to zero. PEG: rs1, imm → r0=rs1, r1=None.
             OpCode::Cbnez => {
-                let rs1 = self.get_x(hart_id, inst.get_r1());
+                let rs1 = self.get_x(hart_id, inst.get_r0());
                 if rs1 != 0 {
                     let offset = self.get_i64_from_imm(hart_id, inst.get_imm());
                     let hart = self.get_hart_mut(hart_id).unwrap();
@@ -3250,6 +3324,116 @@ impl Machine {
             // C.NOP: No operation (C.ADDI x0, x0, 0)
             OpCode::Cnop => {
                 self.next_pc_by(hart_id, 2)?;
+            }
+            // ============================================================
+            // CSR Instructions (Zicsr extension)
+            // ============================================================
+            // CSRRW rd, csr, rs1: atomic read/write CSR
+            //   rd = CSR[csr]; CSR[csr] = rs1
+            OpCode::Csrrw => {
+                let csr_addr = self.get_resolved_u64(hart_id, inst);
+                let rs1_val = self.get_x(hart_id, inst.get_r1());
+                let old_val = self.read_csr(hart_id, csr_addr);
+                self.write_csr(hart_id, csr_addr, rs1_val);
+                self.set_x(hart_id, inst.get_r0(), old_val);
+                self.next_pc(hart_id)?;
+            }
+            // CSRRS rd, csr, rs1: atomic read and set bits in CSR
+            //   rd = CSR[csr]; CSR[csr] = CSR[csr] | rs1
+            OpCode::Csrrs => {
+                let csr_addr = self.get_resolved_u64(hart_id, inst);
+                let rs1_val = self.get_x(hart_id, inst.get_r1());
+                let old_val = self.read_csr(hart_id, csr_addr);
+                let rs1_idx = self.xreg(&inst.get_r1().cloned());
+                if rs1_idx != 0 { // if rs1 is x0, don't write (CSRRS pseudo-instruction)
+                    self.write_csr(hart_id, csr_addr, old_val | rs1_val);
+                }
+                self.set_x(hart_id, inst.get_r0(), old_val);
+                self.next_pc(hart_id)?;
+            }
+            // CSRRC rd, csr, rs1: atomic read and clear bits in CSR
+            //   rd = CSR[csr]; CSR[csr] = CSR[csr] & ~rs1
+            OpCode::Csrrc => {
+                let csr_addr = self.get_resolved_u64(hart_id, inst);
+                let rs1_val = self.get_x(hart_id, inst.get_r1());
+                let old_val = self.read_csr(hart_id, csr_addr);
+                let rs1_idx = self.xreg(&inst.get_r1().cloned());
+                if rs1_idx != 0 { // if rs1 is x0, don't write (CSRRC pseudo-instruction)
+                    self.write_csr(hart_id, csr_addr, old_val & !rs1_val);
+                }
+                self.set_x(hart_id, inst.get_r0(), old_val);
+                self.next_pc(hart_id)?;
+            }
+            // CSRRWI rd, csr, zimm: atomic read/write CSR (immediate)
+            //   rd = CSR[csr]; CSR[csr] = zimm (zero-extended)
+            OpCode::Csrrwi => {
+                let csr_addr = self.get_resolved_u64(hart_id, inst);
+                let zimm = self.get_x(hart_id, inst.get_r1()); // r1 is uimm[4:0] = zimm
+                let old_val = self.read_csr(hart_id, csr_addr);
+                self.write_csr(hart_id, csr_addr, zimm);
+                self.set_x(hart_id, inst.get_r0(), old_val);
+                self.next_pc(hart_id)?;
+            }
+            // CSRRSI rd, csr, zimm: atomic read and set bits in CSR (immediate)
+            //   rd = CSR[csr]; CSR[csr] = CSR[csr] | zimm
+            OpCode::Csrrsi => {
+                let csr_addr = self.get_resolved_u64(hart_id, inst);
+                let zimm = self.get_x(hart_id, inst.get_r1()); // r1 is uimm[4:0] = zimm
+                let old_val = self.read_csr(hart_id, csr_addr);
+                if zimm != 0 { // if zimm is 0, don't write
+                    self.write_csr(hart_id, csr_addr, old_val | zimm);
+                }
+                self.set_x(hart_id, inst.get_r0(), old_val);
+                self.next_pc(hart_id)?;
+            }
+            // CSRRCI rd, csr, zimm: atomic read and clear bits in CSR (immediate)
+            //   rd = CSR[csr]; CSR[csr] = CSR[csr] & ~zimm
+            OpCode::Csrrci => {
+                let csr_addr = self.get_resolved_u64(hart_id, inst);
+                let zimm = self.get_x(hart_id, inst.get_r1()); // r1 is uimm[4:0] = zimm
+                let old_val = self.read_csr(hart_id, csr_addr);
+                if zimm != 0 { // if zimm is 0, don't write
+                    self.write_csr(hart_id, csr_addr, old_val & !zimm);
+                }
+                self.set_x(hart_id, inst.get_r0(), old_val);
+                self.next_pc(hart_id)?;
+            }
+            // ECALL: Environment call (trap to higher privilege)
+            OpCode::Ecall => {
+                let hart = self.get_hart_mut(hart_id).unwrap();
+                hart.take_trap(EXCEPTION_ENVIRONMENT_CALL_FROM_M, hart.pc as u64, false);
+            }
+            // EBREAK: Environment breakpoint
+            OpCode::Ebreak => {
+                let hart = self.get_hart_mut(hart_id).unwrap();
+                hart.take_trap(EXCEPTION_BREAKPOINT, hart.pc as u64, false);
+            }
+            // MRET: Machine trap return
+            OpCode::Mret => {
+                let hart = self.get_hart_mut(hart_id).unwrap();
+                let mepc = hart.read_csr(0x341); // mepc
+                let mstatus = hart.read_csr(0x300);
+                // Set privilege to MPP (bits 11:12 of mstatus)
+                let mpp = (mstatus >> 11) & 0x3;
+                hart.privilege = match mpp {
+                    0 => PrivilegeLevel::User,
+                    1 => PrivilegeLevel::Supervisor,
+                    _ => PrivilegeLevel::Machine,
+                };
+                // Set MIE = MPIE (restore previous interrupt enable)
+                let mpie = (mstatus >> 7) & 1;
+                hart.write_csr(0x300, (mstatus & !(1 << 3)) | (mpie << 3));
+                // Set MPIE = 1
+                hart.write_csr(0x300, hart.read_csr(0x300) | (1 << 7));
+                hart.pc = mepc as usize;
+            }
+            // WFI: Wait for interrupt (treated as NOP for now)
+            OpCode::Wfi => {
+                self.next_pc(hart_id)?;
+            }
+            // FENCE/FENCE.I: Memory ordering (treated as NOP for single-hart)
+            OpCode::Fence | OpCode::Fencei => {
+                self.next_pc(hart_id)?;
             }
             _ => {
                 return Err(DebuggerError::GeneralError(format!("unsupported instruction: {:?}", opcode)));

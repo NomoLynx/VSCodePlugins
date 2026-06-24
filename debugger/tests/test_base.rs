@@ -954,8 +954,7 @@ main:
 
 #[test]
 fn test_cmv() {
-    // c.mv t0, t1: r0=t0, r1=t1, r2=None→x0. So t0 = x0 = 0.
-    // Note: implementation uses get_r2() which is None→0, not r1.
+    // c.mv t0, t1: PEG: rd, rs1 → r0=t0, r1=t1. t0 = t1 = 42.
     let asm = r#"
 .text
 main:
@@ -964,7 +963,7 @@ main:
     let mut m = setup_machine(asm);
     set_reg(&mut m, "t1", 42);
     step(&mut m);
-    assert_eq!(get_reg(&m, "t0"), 0);
+    assert_eq!(get_reg(&m, "t0"), 42);
 }
 
 #[test]
@@ -994,7 +993,7 @@ main:
 
 #[test]
 fn test_clui() {
-    // c.lui t0, 0x1F: r0=t0, r1=None→x0=0. imm is used as-is, not shifted.
+    // c.lui t0, 0x1F: imm << 12 = 0x1F000
     let asm = r#"
 .text
 main:
@@ -1002,40 +1001,42 @@ main:
 "#;
     let mut m = setup_machine(asm);
     step(&mut m);
-    assert_eq!(get_reg(&m, "t0"), 31);
+    assert_eq!(get_reg(&m, "t0"), 0x1F000);
 }
 
 #[test]
 fn test_cadd() {
-    // c.add t0, t1: r0=t0, r1=t1, r2=None→x0. So t0 = t1 + 0 = t1.
+    // c.add t0, t1: t0 = t0 + t1. PEG: r0=rd, r1=rs2.
     let asm = r#"
 .text
 main:
     c.add t0, t1
 "#;
     let mut m = setup_machine(asm);
+    set_reg(&mut m, "t0", 10);
     set_reg(&mut m, "t1", 20);
     step(&mut m);
-    assert_eq!(get_reg(&m, "t0"), 20);
+    assert_eq!(get_reg(&m, "t0"), 30);
 }
 
 #[test]
 fn test_csub() {
-    // c.sub t0, t1: r0=t0, r1=t1, r2=None→x0. So t0 = t1 - 0 = t1.
+    // c.sub t0, t1: t0 = t0 - t1. PEG: r0=rd, r1=rs2.
     let asm = r#"
 .text
 main:
     c.sub t0, t1
 "#;
     let mut m = setup_machine(asm);
+    set_reg(&mut m, "t0", 50);
     set_reg(&mut m, "t1", 20);
     step(&mut m);
-    assert_eq!(get_reg(&m, "t0"), 20);
+    assert_eq!(get_reg(&m, "t0"), 30);
 }
 
 #[test]
 fn test_cslli() {
-    // c.slli t0, 3: r0=t0, r1=None→x0=0. So t0 = 0 << 3 = 0.
+    // c.slli t0, 3: t0 = t0 << 3. PEG: r0=rd, r1=None→x0.
     let asm = r#"
 .text
 main:
@@ -1044,34 +1045,36 @@ main:
     let mut m = setup_machine(asm);
     set_reg(&mut m, "t0", 5);
     step(&mut m);
-    assert_eq!(get_reg(&m, "t0"), 0);
+    assert_eq!(get_reg(&m, "t0"), 40); // 5 << 3 = 40
 }
 
 #[test]
 fn test_caddiw() {
-    // c.addiw t0, 5: r0=t0, r1=None→x0=0. So t0 = (0 as i32).wrapping_add(5) sign-extended = 5.
+    // c.addiw t0, 5: t0 = (t0 as i32).wrapping_add(5) sign-extended. PEG: r0=rd, r1=None→x0.
     let asm = r#"
 .text
 main:
     c.addiw t0, 5
 "#;
     let mut m = setup_machine(asm);
+    set_reg(&mut m, "t0", 10);
     step(&mut m);
-    assert_eq!(get_reg(&m, "t0"), 5);
+    assert_eq!(get_reg(&m, "t0"), 15);
 }
 
 #[test]
 fn test_caddw() {
-    // c.addw t0, t1: r0=t0, r1=t1, r2=None→x0. So t0 = (t1 as i32 + 0) sign-extended.
+    // c.addw t0, t1: t0 = (t0 as i32 + t1 as i32) sign-extended. PEG: r0=rd, r1=rs2.
     let asm = r#"
 .text
 main:
     c.addw t0, t1
 "#;
     let mut m = setup_machine(asm);
-    set_reg(&mut m, "t1", 1);
+    set_reg(&mut m, "t0", 5);
+    set_reg(&mut m, "t1", 3);
     step(&mut m);
-    assert_eq!(get_reg(&m, "t0"), 1);
+    assert_eq!(get_reg(&m, "t0"), 8);
 }
 
 // ============================================================
@@ -1090,8 +1093,8 @@ main:
 
 #[test]
 fn test_cbeqz_taken() {
-    // NOTE: c.beqz uses get_r1() which is None→x0=0 for the PEG pattern "rs1, imm".
-    // So c.beqz ALWAYS branches (rs1 is always 0). This test verifies that behavior.
+    // c.beqz rs1, imm: branch if rs1 == 0. PEG: r0=rs1, r1=None.
+    // t1=0 → branch taken, skip one C instruction.
     let asm = r#"
 .text
 main:
@@ -1100,15 +1103,34 @@ main:
     c.addi t0, 2
 "#;
     let mut m = setup_machine(asm);
-    // Branch always taken regardless of t1 value (implementation uses r1=None→0)
-    step(&mut m); // c.beqz: always taken, pc=100+4=104
+    set_reg(&mut m, "t1", 0); // t1 == 0 → branch taken
+    step(&mut m); // c.beqz: taken, pc+=4
     step(&mut m); // c.addi t0, 2 → t0 = 0 + 2 = 2
     assert_eq!(get_reg(&m, "t0"), 2);
 }
 
 #[test]
-fn test_cbnez_not_taken() {
-    // NOTE: c.bnez uses get_r1() which is None→x0=0. So c.bnez NEVER branches.
+fn test_cbeqz_not_taken() {
+    // c.beqz rs1, imm: branch if rs1 == 0.
+    // t1=5 (non-zero) → branch NOT taken.
+    let asm = r#"
+.text
+main:
+    c.beqz t1, 4
+    c.addi t0, 1
+    c.addi t0, 2
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 5); // t1 != 0 → not taken
+    step(&mut m); // c.beqz: not taken
+    step(&mut m); // c.addi t0, 1 → t0 = 0 + 1 = 1
+    assert_eq!(get_reg(&m, "t0"), 1);
+}
+
+#[test]
+fn test_cbnez_taken() {
+    // c.bnez rs1, imm: branch if rs1 != 0. PEG: r0=rs1, r1=None.
+    // t1=5 (non-zero) → branch taken.
     let asm = r#"
 .text
 main:
@@ -1117,18 +1139,36 @@ main:
     c.addi t0, 2
 "#;
     let mut m = setup_machine(asm);
-    // Branch never taken regardless of t1 value (implementation uses r1=None→0)
-    step(&mut m); // c.bnez: never taken
+    set_reg(&mut m, "t1", 5); // t1 != 0 → branch taken
+    step(&mut m); // c.bnez: taken, pc+=4
+    step(&mut m); // c.addi t0, 2 → t0 = 0 + 2 = 2
+    assert_eq!(get_reg(&m, "t0"), 2);
+}
+
+#[test]
+fn test_cbnez_not_taken() {
+    // c.bnez rs1, imm: branch if rs1 != 0.
+    // t1=0 → branch NOT taken.
+    let asm = r#"
+.text
+main:
+    c.bnez t1, 4
+    c.addi t0, 1
+    c.addi t0, 2
+"#;
+    let mut m = setup_machine(asm);
+    set_reg(&mut m, "t1", 0); // t1 == 0 → not taken
+    step(&mut m); // c.bnez: not taken
     step(&mut m); // c.addi t0, 1 → t0 = 0 + 1 = 1
     assert_eq!(get_reg(&m, "t0"), 1);
 }
 
 // ============================================================
 // C Extension: Load/Store
-// NOTE: Implementation quirks:
-// - C stores: PEG c.sw rs1, rs2, imm → r0=rs1, r1=rs2.
-//   But implementation uses r1 as base and r0 as value (SWAPPED).
-// - C stack ops (lwsp/swsp/ldsp/sdsp): r1=None→x0, so base=0, NOT sp.
+// PEG mappings:
+// - C loads (c.lw/c.ld):  rd, rs1, imm → r0=rd, r1=rs1(base)
+// - C stores (c.sw/c.sd): rs1, rs2, imm → r0=rs1(base), r1=rs2(value)
+// - C stack ops (lwsp/ldsp/swsp/sdsp): rd/rs2, imm, base=sp(x2)
 // ============================================================
 
 #[test]
@@ -1149,15 +1189,9 @@ main:
 
 #[test]
 fn test_csw() {
-    // PEG: c.sw rs1, rs2, imm → r0=rs1, r1=rs2
-    // Implementation: base=get_r1()=rs2, val=get_r0()=rs1 (SWAPPED!)
-    // So c.sw base_register, value_register, 0:
-    //   r0=base_register, r1=value_register
-    //   But impl uses r1 as base, r0 as value → actually writes r0 to [r1]
-    // To store 0xDEADBEEF to 0x1000, we need:
-    //   r1 = 0x1000 (base), r0 = 0xDEADBEEF (value)
-    // PEG: c.sw t0, t1, 0 → r0=t0, r1=t1
-    // So set t0=value, t1=base
+    // PEG: c.sw rs1, rs2, imm → r0=rs1(base), r1=rs2(value)
+    // c.sw t0, t1, 0 → r0=t0 (base), r1=t1 (value to store)
+    // So set t0=base, t1=value
     let asm = r#"
 .text
 main:
@@ -1165,8 +1199,8 @@ main:
 "#;
     let mut m = setup_machine(asm);
     let test_addr: u64 = 0x1000;
-    set_reg(&mut m, "t1", test_addr);   // r1=base
-    set_reg(&mut m, "t0", 0xDEADBEEF);  // r0=value
+    set_reg(&mut m, "t0", test_addr);   // r0=base
+    set_reg(&mut m, "t1", 0xDEADBEEF);  // r1=value
     step(&mut m);
     assert_eq!(m.memory.read_u32(test_addr), 0xDEADBEEF);
 }
@@ -1189,9 +1223,9 @@ main:
 
 #[test]
 fn test_csd() {
-    // PEG: c.sd rs1, rs2, imm → r0=rs1, r1=rs2
-    // Implementation: base=get_r1()=rs2, val=get_r0()=rs1 (SWAPPED!)
-    // To store val to [base]: c.sd t0, t1, 0 with t0=val, t1=base
+    // PEG: c.sd rs1, rs2, imm → r0=rs1(base), r1=rs2(value)
+    // c.sd t0, t1, 0 → r0=t0 (base), r1=t1 (value to store)
+    // So set t0=base, t1=value
     let asm = r#"
 .text
 main:
@@ -1199,66 +1233,69 @@ main:
 "#;
     let mut m = setup_machine(asm);
     let test_addr: u64 = 0x1000;
-    set_reg(&mut m, "t1", test_addr);                 // r1=base
-    set_reg(&mut m, "t0", 0x0123456789ABCDEF);        // r0=value
+    set_reg(&mut m, "t0", test_addr);                 // r0=base
+    set_reg(&mut m, "t1", 0x0123456789ABCDEF);        // r1=value
     step(&mut m);
     assert_eq!(m.memory.read_u64(test_addr), 0x0123456789ABCDEF);
 }
 
 #[test]
 fn test_clwsp() {
-    // c.lwsp rd, imm: r0=rd, r1=None→x0=0. base=0, NOT sp.
-    // So loads from address imm (x0+imm).
+    // c.lwsp rd, imm: loads from sp + imm. Set sp=0x1000, imm=4 → addr=0x1004.
     let asm = r#"
 .text
 main:
     c.lwsp t0, 4
 "#;
     let mut m = setup_machine(asm);
-    m.memory.write_u32(4, 0x12345678);
+    // Set sp (x2) to 0x1000
+    m.get_default_hart_mut().unwrap().x.regs[2].value = 0x1000;
+    m.memory.write_u32(0x1004, 0x12345678);
     step(&mut m);
     assert_eq!(get_reg(&m, "t0"), 0x12345678);
 }
 
 #[test]
 fn test_cswsp() {
-    // c.swsp rs2, imm: r0=rs2, r1=None→x0=0. base=0, NOT sp.
-    // So stores to address imm (x0+imm).
+    // c.swsp rs2, imm: stores to sp + imm. Set sp=0x1000, imm=4 → addr=0x1004.
     let asm = r#"
 .text
 main:
     c.swsp t0, 4
 "#;
     let mut m = setup_machine(asm);
+    m.get_default_hart_mut().unwrap().x.regs[2].value = 0x1000;
     set_reg(&mut m, "t0", 0xDEADBEEF);
     step(&mut m);
-    assert_eq!(m.memory.read_u32(4), 0xDEADBEEF);
+    assert_eq!(m.memory.read_u32(0x1004), 0xDEADBEEF);
 }
 
 #[test]
 fn test_cldsp() {
-    // c.ldsp rd, imm: r0=rd, r1=None→x0=0. base=0.
+    // c.ldsp rd, imm: loads from sp + imm. Set sp=0x1000, imm=8 → addr=0x1008.
     let asm = r#"
 .text
 main:
     c.ldsp t0, 8
 "#;
     let mut m = setup_machine(asm);
-    m.memory.write_u64(8, 0x0123456789ABCDEF);
+    m.get_default_hart_mut().unwrap().x.regs[2].value = 0x1000;
+    m.memory.write_u64(0x1008, 0x0123456789ABCDEF);
     step(&mut m);
     assert_eq!(get_reg(&m, "t0"), 0x0123456789ABCDEF);
 }
 
 #[test]
 fn test_csdsp() {
-    // c.sdsp rs2, imm: r0=rs2, r1=None→x0=0. base=0.
+    // c.sdsp rs2, imm: stores to sp + imm. Set sp=0x1000, imm=8 → addr=0x1008.
     let asm = r#"
 .text
 main:
     c.sdsp t0, 8
 "#;
     let mut m = setup_machine(asm);
+    m.get_default_hart_mut().unwrap().x.regs[2].value = 0x1000;
     set_reg(&mut m, "t0", 0x0123456789ABCDEF);
     step(&mut m);
-    assert_eq!(m.memory.read_u64(8), 0x0123456789ABCDEF);
+    assert_eq!(m.memory.read_u64(0x1008), 0x0123456789ABCDEF);
 }
