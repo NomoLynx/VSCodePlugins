@@ -1,3 +1,8 @@
+#[path = "../src/utility.rs"]
+mod utility;
+use crate::utility::*;
+
+// Sub-module declarations at crate root (required by `crate::machine::...` etc.)
 #[path = "../src/machine/mod.rs"]
 mod machine;
 #[path = "../src/memory/mod.rs"]
@@ -10,40 +15,6 @@ mod trace;
 mod debug;
 #[path = "../src/debugger_error.rs"]
 mod debugger_error;
-
-use riscv_asm_lib::r5asm::assembler::*;
-use crate::machine::machine::Machine;
-use crate::machine::runtime_value::RuntimeValue;
-
-// Helper functions
-fn setup_machine(asm_text: &str) -> Machine {
-    let mut machine = Machine::default();
-    let program = parse_asm_use_default_config(asm_text).unwrap();
-    machine.add_program(program);
-    let hart_id = machine.get_default_hart_id();
-    machine.init_hart_to_entry_point(hart_id).unwrap();
-    machine
-}
-
-fn step(machine: &mut Machine) {
-    let hart_id = machine.get_default_hart_id();
-    machine.step_hart(hart_id).unwrap();
-}
-
-fn get_reg(machine: &Machine, name: &str) -> u64 {
-    let reg = machine.lookup_register(name).unwrap();
-    let hart = machine.get_default_hart().unwrap();
-    match hart.read_register(&reg) {
-        RuntimeValue::Integer(v) => v,
-        _ => panic!("Expected integer register"),
-    }
-}
-
-fn set_reg(machine: &mut Machine, name: &str, value: u64) {
-    let reg = machine.lookup_register(name).unwrap();
-    let hart = machine.get_default_hart_mut().unwrap();
-    hart.write_register(&reg, RuntimeValue::Integer(value));
-}
 
 // ============================================================
 // RV32I: Basic integer arithmetic tests (R-type)
