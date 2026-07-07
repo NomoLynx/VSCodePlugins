@@ -1,3 +1,4 @@
+use crate::debugger_error::DebuggerError;
 use crate::machine::{machine::ProgramId, register_ref::{RegisterRef, RegisterType}, runtime_value::RuntimeValue};
 
 #[derive(Clone, Debug)]
@@ -13,6 +14,9 @@ pub struct IntegerRegisterFile {
 
 impl IntegerRegisterFile {
     pub fn read(&self, reg: usize) -> u64 {
+        if reg == 0 {
+            return 0; // x0 is hardwired to 0
+        }
         self.regs[reg].value
     }
 
@@ -168,7 +172,7 @@ impl Hart {
             RegisterType::Integer => {
 
                 RuntimeValue::Integer(
-                    self.x.regs[reg.index].value
+                    self.x.read(reg.index)
                 )
             }
 
@@ -189,7 +193,12 @@ impl Hart {
             }
 
             RegisterType::Csr => {
-                todo!()
+                match reg.index {
+                    0 => RuntimeValue::Integer(self.csr.mhartid),
+                    1 => RuntimeValue::Integer(self.csr.vl),
+                    2 => RuntimeValue::Integer(self.csr.vtype),
+                    _ => RuntimeValue::Unavailable,
+                }
             }
         }
     }
@@ -198,43 +207,30 @@ impl Hart {
         &mut self,
         reg: &RegisterRef,
         value: RuntimeValue,
-    ) {
+    ) -> Result<(), DebuggerError> {
 
-        match (
-            reg.reg_type,
-            value,
-        ) {
-
-            (
-                RegisterType::Integer,
-                RuntimeValue::Integer(v),
-            ) => {
-
-                if reg.index != 0 {
-                    self.x.regs[reg.index].value = v;
-                }
+        let reg_type = reg.reg_type;
+        match (reg_type, value) {
+            (RegisterType::Integer, RuntimeValue::Integer(v)) => {
+                self.x.write(reg.index, v); // IntegerRegisterFile::write guards x0
             }
 
-            (
-                RegisterType::Float,
-                RuntimeValue::Float64(v),
-            ) => {
-
+            (RegisterType::Float, RuntimeValue::Float64(v)) => {
                 self.f.regs[reg.index].value = v;
             }
 
-            (
-                RegisterType::Vector,
-                RuntimeValue::Vector(v),
-            ) => {
-
+            (RegisterType::Vector, RuntimeValue::Vector(v)) => {
                 self.v.regs[reg.index].bytes = v;
             }
 
-            _ => {
-                panic!("register type mismatch");
+            (unexpected_type, unexpected_value) => {
+                return Err(DebuggerError::RegisterWriteError(
+                    format!("register type mismatch: expected {:?}, got {:?}", unexpected_type, unexpected_value)
+                ));
             }
         }
+
+        Ok(())
     }
 }
 

@@ -102,6 +102,11 @@
         }
       }
     ],
+    "breakpoints": [
+      {
+        "language": "riscvasm"
+      }
+    ],
     "configurationDefaults": {
       "[riscvasm]": {
         "editor.semanticHighlighting.enabled": true

@@ -120,8 +120,8 @@ main:
     let program = parse_asm_use_default_config(&asm_prog_text).unwrap();
     machine.add_program(program);
 
-    assert_eq!(machine.memory.read_u32(0), 0);
-    assert_eq!(machine.memory.read_u32(4), 1);
+    assert_eq!(machine.memory.read_u32(0).unwrap(), 0);
+    assert_eq!(machine.memory.read_u32(4).unwrap(), 1);
 }
 
 #[test]
