@@ -1013,10 +1013,10 @@ main:
     set_vreg(&mut m, "v1", v1);
     step(&mut m);
     // Verify memory was written
-    assert_eq!(m.memory.read_u32(base), 111);
-    assert_eq!(m.memory.read_u32(base + 4), 222);
-    assert_eq!(m.memory.read_u32(base + 8), 333);
-    assert_eq!(m.memory.read_u32(base + 12), 444);
+    assert_eq!(m.memory.read_u32(base).unwrap_or_default(), 111);
+    assert_eq!(m.memory.read_u32(base + 4).unwrap_or_default(), 222);
+    assert_eq!(m.memory.read_u32(base + 8).unwrap_or_default(), 333);
+    assert_eq!(m.memory.read_u32(base + 12).unwrap_or_default(), 444);
 }
 
 #[test]
@@ -1035,8 +1035,8 @@ main:
     set_velem(&mut v1, 1, 8, 0x1111222233334444);
     set_vreg(&mut m, "v1", v1);
     step(&mut m);
-    assert_eq!(m.memory.read_u64(base), 0xAAAABBBBCCCCDDDD);
-    assert_eq!(m.memory.read_u64(base + 8), 0x1111222233334444);
+    assert_eq!(m.memory.read_u64(base).unwrap_or_default(), 0xAAAABBBBCCCCDDDD);
+    assert_eq!(m.memory.read_u64(base + 8).unwrap_or_default(), 0x1111222233334444);
 }
 
 // ============================================================

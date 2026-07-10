@@ -6,6 +6,9 @@ pub enum RuntimeValue {
     Float64(f64),
 
     Vector(Vec<u8>),
+
+    /// Value is not available (e.g. unimplemented CSR register)
+    Unavailable,
 }
 
 impl From<u64> for RuntimeValue {

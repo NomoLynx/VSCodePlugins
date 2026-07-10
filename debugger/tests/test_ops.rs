@@ -1951,7 +1951,7 @@ main:
     set_reg(&mut m, "t1", test_addr);
     set_freg(&mut m, "f0", 3.14159265358979);
     step(&mut m);
-    let result_bits = m.memory.read_u64(test_addr);
+    let result_bits = m.memory.read_u64(test_addr).unwrap_or_default();
     let result = f64::from_bits(result_bits);
     assert!((result - 3.14159265358979).abs() < 0.0001);
 }
@@ -2165,7 +2165,7 @@ main:
     set_reg(&mut m, "t1", test_addr);
     set_freg(&mut m, "f0", 3.14f32 as f64);
     step(&mut m);
-    let result_bits = m.memory.read_u32(test_addr);
+    let result_bits = m.memory.read_u32(test_addr).unwrap_or_default();
     let result = f32::from_bits(result_bits);
     assert!((result - 3.14f32).abs() < 0.001);
 }

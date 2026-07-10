@@ -10,13 +10,77 @@ import {
 
 let client: LanguageClient | undefined;
 
+let outputChannel: vscode.OutputChannel;
+
 function serverBinaryName(): string {
   return process.platform === "win32"
     ? "rust_keyword_lsp_server.exe"
     : "rust_keyword_lsp_server";
 }
 
+function debuggerBinaryName(): string {
+  return process.platform === "win32"
+    ? "riscv_debug_adapter.exe"
+    : "riscv_debug_adapter";
+}
+
+class RiscvDebugAdapterFactory
+  implements vscode.DebugAdapterDescriptorFactory {
+
+  constructor(
+    private readonly context: vscode.ExtensionContext,
+    private readonly output: vscode.OutputChannel
+  ) {}
+
+  createDebugAdapterDescriptor(
+    session: vscode.DebugSession
+  ): vscode.ProviderResult<vscode.DebugAdapterDescriptor> {
+
+    const debuggerPath = path.join(
+      this.context.extensionPath,
+      "debugger",
+      "target",
+      "release",
+      "riscv_debug_adapter.exe"
+    );
+
+    this.output.appendLine("Launching debugger:");
+    this.output.appendLine(debuggerPath);
+
+    if (!fs.existsSync(debuggerPath)) {
+      this.output.appendLine("❌ debugger not found");
+      vscode.window.showErrorMessage("Debugger not found");
+      return;
+    }
+
+    const logDir = path.join(
+        this.context.extensionPath,
+        "logs"
+    );
+
+    fs.mkdirSync(logDir, { recursive: true });
+
+    const logFile = path.join(
+        logDir,
+        "riscv_debugger.log"
+    );
+
+    return new vscode.DebugAdapterExecutable(
+        debuggerPath,
+        [
+            "--log-file",
+            logFile,
+            "--extension-root",
+            this.context.extensionPath
+        ]
+    );
+  }
+}
+
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+
+  outputChannel = vscode.window.createOutputChannel("RISC-V Debugger");
+  outputChannel.appendLine("Debugger extension activated");
 
   const serverPath = path.join(
     context.extensionPath,
@@ -60,6 +124,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
 
   console.log("RISC-V extension starting...");
+
+  context.subscriptions.push(
+    vscode.debug.registerDebugAdapterDescriptorFactory(
+      "riscv",
+      new RiscvDebugAdapterFactory(context, outputChannel)
+    )
+  );
 
   try {
     await client.start();

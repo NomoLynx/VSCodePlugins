@@ -20,14 +20,18 @@ use crate::machine::machine::Machine;
 #[test]
 fn test_machine_execution() {
     // Get the manifest directory and construct path to code.asm
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let asm_file_path = PathBuf::from(manifest_dir)
-        .join("tests")
-        .join("code.asm");
+       let asm_prog_text = r#"
+.data
+    a0: .word 0
+    b0: .word 1
+
+.text
+main:
+    add t0, t1, t2
+    beq t3, t4, main
+"#;
     
     let mut machine = Machine::default();
-
-    let asm_prog_text = read_file_to_string(asm_file_path.to_str().unwrap());
     let program = parse_asm_use_default_config(&asm_prog_text).unwrap();
     machine.add_program(program);
 
@@ -60,14 +64,18 @@ fn test_machine_execution() {
 #[test]
 fn test_data_load() {
     // Get the manifest directory and construct path to code.asm
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let asm_file_path = PathBuf::from(manifest_dir)
-        .join("tests")
-        .join("code2.asm");
+    let asm_prog_text = r#"
+.data
+    a0: .word 0
+    b0: .word 1
+
+.text
+main:
+    la t0, b0
+    lw t1, 0(t0)
+"#;
 
     let mut machine = Machine::default();
-
-    let asm_prog_text = read_file_to_string(asm_file_path.to_str().unwrap());
     let program = parse_asm_use_default_config(&asm_prog_text).unwrap();
     machine.add_program(program);
 
@@ -97,19 +105,23 @@ fn test_data_load() {
 
 #[test]
 fn test_program_data_is_loaded_into_memory() {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let asm_file_path = PathBuf::from(manifest_dir)
-        .join("tests")
-        .join("code2.asm");
+    let asm_prog_text = r#"
+.data
+    a0: .word 0
+    b0: .word 1
+
+.text
+main:
+    la t0, b0
+    lw t1, 0(t0)
+"#;
 
     let mut machine = Machine::default();
-
-    let asm_prog_text = read_file_to_string(asm_file_path.to_str().unwrap());
     let program = parse_asm_use_default_config(&asm_prog_text).unwrap();
     machine.add_program(program);
 
-    assert_eq!(machine.memory.read_u32(0), 0);
-    assert_eq!(machine.memory.read_u32(4), 1);
+    assert_eq!(machine.memory.read_u32(0).unwrap(), 0);
+    assert_eq!(machine.memory.read_u32(4).unwrap(), 1);
 }
 
 #[test]

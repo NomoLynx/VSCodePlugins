@@ -548,7 +548,7 @@ main:
     set_reg(&mut m, "t1", test_addr);
     set_reg(&mut m, "t0", 0xAB);
     step(&mut m);
-    assert_eq!(m.memory.read_u8(test_addr), 0xAB);
+    assert_eq!(m.memory.read_u8(test_addr).unwrap_or_default(), 0xAB);
 }
 
 #[test]
@@ -563,7 +563,7 @@ main:
     set_reg(&mut m, "t1", test_addr);
     set_reg(&mut m, "t0", 0xABCD);
     step(&mut m);
-    assert_eq!(m.memory.read_u16(test_addr), 0xABCD);
+    assert_eq!(m.memory.read_u16(test_addr).unwrap_or_default(), 0xABCD);
 }
 
 #[test]
@@ -578,7 +578,7 @@ main:
     set_reg(&mut m, "t1", test_addr);
     set_reg(&mut m, "t0", 0xDEADBEEF);
     step(&mut m);
-    assert_eq!(m.memory.read_u32(test_addr), 0xDEADBEEF);
+    assert_eq!(m.memory.read_u32(test_addr).unwrap_or_default(), 0xDEADBEEF);
 }
 
 #[test]
@@ -593,7 +593,7 @@ main:
     set_reg(&mut m, "t1", test_addr);
     set_reg(&mut m, "t0", 0x0123456789ABCDEF);
     step(&mut m);
-    assert_eq!(m.memory.read_u64(test_addr), 0x0123456789ABCDEF);
+    assert_eq!(m.memory.read_u64(test_addr).unwrap_or_default(), 0x0123456789ABCDEF);
 }
 
 #[test]
@@ -608,7 +608,7 @@ main:
     set_reg(&mut m, "t1", test_addr);
     set_reg(&mut m, "t0", 0x42);
     step(&mut m);
-    assert_eq!(m.memory.read_u8(test_addr + 8), 0x42);
+    assert_eq!(m.memory.read_u8(test_addr + 8).unwrap_or_default(), 0x42);
 }
 
 // ============================================================
@@ -1173,7 +1173,7 @@ main:
     set_reg(&mut m, "t0", test_addr);   // r0=base
     set_reg(&mut m, "t1", 0xDEADBEEF);  // r1=value
     step(&mut m);
-    assert_eq!(m.memory.read_u32(test_addr), 0xDEADBEEF);
+    assert_eq!(m.memory.read_u32(test_addr).unwrap_or_default(), 0xDEADBEEF);
 }
 
 #[test]
@@ -1207,7 +1207,7 @@ main:
     set_reg(&mut m, "t0", test_addr);                 // r0=base
     set_reg(&mut m, "t1", 0x0123456789ABCDEF);        // r1=value
     step(&mut m);
-    assert_eq!(m.memory.read_u64(test_addr), 0x0123456789ABCDEF);
+    assert_eq!(m.memory.read_u64(test_addr).unwrap_or_default(), 0x0123456789ABCDEF);
 }
 
 #[test]
@@ -1238,7 +1238,7 @@ main:
     m.get_default_hart_mut().unwrap().x.regs[2].value = 0x1000;
     set_reg(&mut m, "t0", 0xDEADBEEF);
     step(&mut m);
-    assert_eq!(m.memory.read_u32(0x1004), 0xDEADBEEF);
+    assert_eq!(m.memory.read_u32(0x1004).unwrap_or_default(), 0xDEADBEEF);
 }
 
 #[test]
@@ -1268,5 +1268,5 @@ main:
     m.get_default_hart_mut().unwrap().x.regs[2].value = 0x1000;
     set_reg(&mut m, "t0", 0x0123456789ABCDEF);
     step(&mut m);
-    assert_eq!(m.memory.read_u64(0x1008), 0x0123456789ABCDEF);
+    assert_eq!(m.memory.read_u64(0x1008).unwrap_or_default(), 0x0123456789ABCDEF);
 }
