@@ -1,4 +1,5 @@
 use super::hart::Hart;
+use crate::memory::memory::Memory;
 
 pub enum AddressingMode {
     Bit32,
@@ -17,17 +18,35 @@ impl AddressingMode {
 }
 
 pub struct Processor {
-    pub id: u64,
     pub harts: Vec<Hart>,
     pub addressing: AddressingMode,
+    /// Processor-local memory shared by all harts within this processor.
+    pub memory: Memory,
+    /// Processor-local clock — advances in lockstep with all other processors.
+    /// Private: modifications must go through step_all_harts or set_clock.
+    clock: u64,
+}
+
+impl Processor {
+    /// Return the current processor clock value (read-only).
+    pub fn clock(&self) -> u64 {
+        self.clock
+    }
+
+    /// Set the processor clock directly. Only accessible within the crate
+    /// so that the Machine layer can enforce the global clock invariant.
+    pub(crate) fn set_clock(&mut self, value: u64) {
+        self.clock = value;
+    }
 }
 
 impl Default for Processor {
     fn default() -> Self {
         Self {
-            id: 0,
             harts: vec![Hart::default()],
             addressing: AddressingMode::Bit64,
+            memory: Memory::default(),
+            clock: 0,
         }
     }
 }

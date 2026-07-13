@@ -8,5 +8,6 @@ _start:
     li a2, 5
     add a0, a0, a2
     sub a3, a0, a1
+    lw gp, 0(x0)
     li t0, 10
     addi t1, t0, 5
