@@ -327,7 +327,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .source
                     .path
                     .as_ref()
-                    .and_then(|path| source_to_program.get(path.as_str()))
+                    .map(|p| canonicalize_path(p))
+                    .and_then(|path| source_to_program.get(&path))
                     .and_then(|&pid| offset_to_line_map.get(&pid))
                     .map(|otl| otl.values().any(|&line| line == target_line))
                     .unwrap_or(false);
@@ -1154,7 +1155,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     // No silent fallback — source.path must be in
                                                     // source_to_program, otherwise return verified: false.
                                                     let bp_program_id = bp_args.source.path.as_ref()
-                                                        .and_then(|path| source_to_program.get(path.as_str()))
+                                                        .map(|p| canonicalize_path(p))
+                                                        .and_then(|path| source_to_program.get(&path))
                                                         .copied();
 
                                                     if bp_program_id.is_none() {
@@ -1772,7 +1774,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .source
                     .path
                     .as_ref()
-                    .and_then(|path| source_to_program.get(path.as_str()))
+                    .map(|p| canonicalize_path(p))
+                    .and_then(|path| source_to_program.get(&path))
                     .copied();
                 if let (Some(ref m), Some(pid)) = (machine.as_ref(), program_id) {
                     if pid < m.programs.len() {
@@ -1900,7 +1903,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .source
                     .path
                     .as_ref()
-                    .and_then(|path| source_to_program.get(path.as_str()))
+                    .map(|p| canonicalize_path(p))
+                    .and_then(|path| source_to_program.get(&path))
                     .copied();
 
                 if program_id.is_none() {
@@ -2226,6 +2230,19 @@ fn do_single_step(
 }
 
 /// Load and assemble a .rv.s file into a Machine and build per-program offset→line mapping
+/// Normalize a file path for consistent HashMap lookups across DAP requests.
+/// Uses std::fs::canonicalize which resolves symlinks, "..", "." segments
+/// and normalizes the path to the OS-native form.  On Windows this also
+/// normalizes drive letter case to uppercase (matching Windows convention).
+///
+/// Falls back to the original path if canonicalization fails (e.g. file
+/// doesn't exist yet or permission denied).
+fn canonicalize_path(path: &str) -> String {
+    std::fs::canonicalize(path)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| path.to_string())
+}
+
 fn load_and_assemble(
     file_path: &str,
     offset_to_line_map: &mut HashMap<usize, HashMap<usize, usize>>,
@@ -2293,7 +2310,12 @@ fn load_and_assemble(
 
     // Build source path → program_id mapping so SetBreakpoints/GotoTargets
     // can match DAP source.path to the correct program.
-    source_to_program.insert(file_path.to_string(), program_id);
+    // P0-27: Canonicalize the path so subsequent DAP requests (which may send
+    // slightly different path representations due to VSCode's internal
+    // path normalization) always match — otherwise SetBreakpoints,
+    // GotoTargets, and BreakpointLocations all fail simultaneously.
+    let canonical_path = canonicalize_path(file_path);
+    source_to_program.insert(canonical_path, program_id);
 
     // init hart to entry point
     machine.init_hart_to_entry_point(0)
