@@ -197,6 +197,8 @@ pub struct Machine {
 
     pub registers: Register,
 
+    pub memory: Memory,
+
     /// O(1) cache: (program_id, pc_offset) → (index in text_section_items, machine_code_count)
     /// machine_code_count is the number of machine-code words the assembler produced for
     /// this item (1 for normal instructions, ≥2 for expanded pseudo-instructions like `la`).
@@ -216,6 +218,7 @@ impl Machine {
             processors: vec![],
             programs: vec![],
             registers: Register::new(),
+            memory: Memory::new(),
             inst_cache: HashMap::new(),
             next_hart_id: 0,       // hart 0 is created by default processor
         };
@@ -250,13 +253,12 @@ impl Machine {
                 let bytes = mc.get_code_data().to_vec();
                 if !bytes.is_empty() {
                     self.inst_cache.insert((id, offset), (idx, count));
-                    // P1-18: Use PC_INCREMENT (4) instead of bytes.len() to stay
-                    // consistent with next_pc() which always advances by 4.
-                    // If RISC-V compressed instructions (2 bytes) are added in
-                    // the future, both cache and PC advancement must be updated
-                    // together — using different values in each place creates a
-                    // silent mismatch that causes every instruction lookup to fail.
-                    offset += PC_INCREMENT;
+                    // P1-18: Use actual instruction byte length so RISC-V
+                    // compressed instructions (2 bytes) are correctly mapped.
+                    // The hart's next_pc / next_pc_by advances PC by 2 for
+                    // compact opcodes and by 4 for standard ones, so the
+                    // cache must match the actual machine-code layout.
+                    offset += bytes.len();
                 }
             }
             // If no machine codes were produced (shouldn't happen for a valid
@@ -360,7 +362,7 @@ impl Machine {
                 let bytes = mc.get_code_data().to_vec();
                 if !bytes.is_empty() {
                     memory.write_bytes(offset, &bytes)?;
-                    offset += PC_INCREMENT as u64;
+                    offset += bytes.len() as u64;
                 }
             }
         }
@@ -624,6 +626,7 @@ impl Machine {
                         );
                         if let Some(hart) = self.get_hart_mut(*hart_id) {
                             hart.exec_cycles = hart.exec_cycles.wrapping_add(1);
+                            hart.csr.mcycle = hart.csr.mcycle.wrapping_add(1);
                         }
                         proc_error = Some(e);
                     }
@@ -671,6 +674,7 @@ impl Machine {
                 for &(hart_id, cycles) in &per_proc_ok_cycles[proc_idx] {
                     if let Some(hart) = self.get_hart_mut(hart_id) {
                         hart.exec_cycles = hart.exec_cycles.wrapping_add(cycles);
+                        hart.csr.mcycle = hart.csr.mcycle.wrapping_add(cycles);
                     }
                 }
 
@@ -901,6 +905,7 @@ impl Machine {
                         .find(|h| h.id == hart_id)
                     {
                         hart.exec_cycles = hart.exec_cycles.wrapping_add(cycles);
+                        hart.csr.mcycle = hart.csr.mcycle.wrapping_add(cycles);
                     }
                 }
                 // P0-6/P0-10: Correct finish_clock ONLY for the hart that was
@@ -941,6 +946,7 @@ impl Machine {
                         .find(|h| h.id == hart_id)
                     {
                         hart.exec_cycles = hart.exec_cycles.wrapping_add(1);
+                        hart.csr.mcycle = hart.csr.mcycle.wrapping_add(1);
                     }
                 }
                 // P0-6/P0-10: Only update finish_clock for the stepped hart if
@@ -1037,6 +1043,7 @@ impl Machine {
             if result.is_ok() {
                 if let Some(hart) = self.get_hart_mut(hart_id) {
                     hart.inst_count = hart.inst_count.wrapping_add(1);
+                    hart.csr.minstret = hart.csr.minstret.wrapping_add(1);
                 }
                 // Advance PC past any remaining machine-code words for this
                 // text_section_item.  execute_inst already called next_pc once
@@ -1057,7 +1064,10 @@ impl Machine {
                     matches!(op, OpCode::Jal | OpCode::Jalr
                         | OpCode::Beq | OpCode::Bne
                         | OpCode::Blt | OpCode::Bge
-                        | OpCode::Bltu | OpCode::Bgeu)
+                        | OpCode::Bltu | OpCode::Bgeu
+                        | OpCode::Cj | OpCode::Cjal
+                        | OpCode::Cjr | OpCode::Cjalr
+                        | OpCode::Cbeqz | OpCode::Cbnez)
                 }).unwrap_or(false);
                 let extra_steps = if is_flow_ctrl {
                     0
@@ -1317,6 +1327,40 @@ impl Machine {
         }
     }
 
+    /// Get current LMUL setting for the hart
+    fn get_lmul(&self, hart_id: HartId) -> usize {
+        let hart = self.get_hart(hart_id).unwrap();
+        hart.vector_state.lmul
+    }
+
+    /// Read bytes from a vector register group (LMUL consecutive registers)
+    fn get_vreg_group_bytes(&self, hart_id: HartId, reg: Option<&String>, lmul: usize) -> Vec<u8> {
+        let start_idx = self.vreg(&reg.cloned());
+        let mut group_bytes = Vec::with_capacity(64 * lmul);
+        for r in 0..lmul {
+            let reg_bytes = self.get_vreg_bytes_by_idx(hart_id, (start_idx + r) % 32);
+            let take = (64).min(reg_bytes.len());
+            group_bytes.extend_from_slice(&reg_bytes[..take]);
+        }
+        group_bytes
+    }
+
+    /// Write bytes to a vector register group, splitting across LMUL consecutive registers
+    fn set_vreg_group_bytes(&mut self, hart_id: HartId, reg: Option<&String>, bytes: &[u8], lmul: usize) {
+        let start_idx = self.vreg(&reg.cloned());
+        let bytes_per_reg = 64usize;
+        for r in 0..lmul {
+            let offset = r * bytes_per_reg;
+            let end = (offset + bytes_per_reg).min(bytes.len());
+            if offset < bytes.len() {
+                let mut reg_bytes = vec![0u8; bytes_per_reg];
+                let copy_len = end - offset;
+                reg_bytes[..copy_len].copy_from_slice(&bytes[offset..end]);
+                self.set_vreg_bytes_by_idx(hart_id, (start_idx + r) % 32, reg_bytes);
+            }
+        }
+    }
+
     /// Get SEW (selected element width) in bytes from vtype
     fn get_sew_bytes(&self, hart_id: HartId) -> usize {
         let hart = self.get_hart(hart_id).unwrap();
@@ -1355,7 +1399,7 @@ impl Machine {
     }
 
     /// Execute vector instruction dispatch
-    fn execute_vector_inst(&mut self, hart_id: HartId, inst: &Instruction) -> Result<(), DebuggerError> {
+    fn execute_vector_inst(&mut self, hart_id: HartId, inst: &Instruction, proc_idx: usize) -> Result<(), DebuggerError> {
         let name = inst.get_instruction_name().to_lowercase();
 
         // vsetvl/vsetvli/vsetivli - vector config
@@ -1368,14 +1412,14 @@ impl Machine {
             || name.starts_with("vl1r") || name.starts_with("vl2r") || name.starts_with("vl3r") || name.starts_with("vl4r")
             || name.starts_with("vl1re") || name.starts_with("vl2re") || name.starts_with("vl3re") || name.starts_with("vl4re")
         {
-            return self.execute_vload(hart_id, inst);
+            return self.execute_vload(hart_id, inst, proc_idx);
         }
 
         // vse* / vsse* / vsuxei* / vsoxei* / vs*r - vector stores
         if name.starts_with("vse") || name.starts_with("vsse") || name.starts_with("vsuxei") || name.starts_with("vsoxei")
             || name.starts_with("vs1r") || name.starts_with("vs2r") || name.starts_with("vs3r") || name.starts_with("vs4r")
         {
-            return self.execute_vstore(hart_id, inst);
+            return self.execute_vstore(hart_id, inst, proc_idx);
         }
 
         // vred*.vs - reductions
@@ -1477,6 +1521,7 @@ impl Machine {
         let vl = self.get_vl(hart_id);
         let sew = self.get_elem_width(hart_id, &name);
         let masked = Self::is_masked(inst);
+        let lmul = self.get_lmul(hart_id);
 
         if vl == 0 {
             self.next_pc(hart_id)?;
@@ -1497,11 +1542,13 @@ impl Machine {
             else if let Some(stripped) = base_name.strip_prefix('v') { stripped }
             else { base_name };
 
-        let vs2_bytes = self.get_vreg_bytes(hart_id, inst.get_r1());
+        let group_bytes = 64 * lmul;
+
+        let vs2_bytes = self.get_vreg_group_bytes(hart_id, inst.get_r1(), lmul);
         let vs1_bytes = if is_vx || is_vi {
             Vec::new()
         } else {
-            self.get_vreg_bytes(hart_id, inst.get_r2())
+            self.get_vreg_group_bytes(hart_id, inst.get_r2(), lmul)
         };
 
         let vs1_scalar = if is_vx || is_vi {
@@ -1522,28 +1569,34 @@ impl Machine {
             None
         };
 
-        let vd_orig_bytes = self.get_vreg_bytes(hart_id, inst.get_r0());
-
         let is_macc = op_name == "madd" || op_name == "nmsub" || op_name == "macc" || op_name == "nmacc";
 
+        let vd_orig_bytes = if is_macc {
+            self.get_vreg_group_bytes(hart_id, inst.get_r0(), lmul)
+        } else {
+            Vec::new()
+        };
+
         let mut vd_bytes = if is_macc {
-            let mut b = vec![0u8; 64];
-            b[..vd_orig_bytes.len().min(64)].copy_from_slice(&vd_orig_bytes[..vd_orig_bytes.len().min(64)]);
+            let mut b = vec![0u8; group_bytes];
+            let copy_len = vd_orig_bytes.len().min(group_bytes);
+            b[..copy_len].copy_from_slice(&vd_orig_bytes[..copy_len]);
             b
         } else if op_name == "merge" || op_name == "move" {
-            let mut b = vec![0u8; 64];
-            b[..vs2_bytes.len().min(64)].copy_from_slice(&vs2_bytes[..vs2_bytes.len().min(64)]);
+            let mut b = vec![0u8; group_bytes];
+            let copy_len = vs2_bytes.len().min(group_bytes);
+            b[..copy_len].copy_from_slice(&vs2_bytes[..copy_len]);
             b
         } else {
-            vec![0u8; 64]
+            vec![0u8; group_bytes]
         };
 
         for i in 0..vl {
             let byte_offset = i * sew;
-            if byte_offset + sew > 64 { break; }
+            if byte_offset + sew > group_bytes { break; }
 
             if masked {
-                let v0_bytes = self.get_vreg_bytes(hart_id, Some(&"v0".to_string()));
+                let v0_bytes = self.get_vreg_group_bytes(hart_id, Some(&"v0".to_string()), lmul);
                 let mask_byte = v0_bytes.get(byte_offset).copied().unwrap_or(0);
                 if mask_byte & 1 == 0 { continue; }
             }
@@ -1632,16 +1685,17 @@ impl Machine {
             Self::write_elem(&mut vd_bytes, byte_offset, sew, result);
         }
 
-        self.set_vreg_bytes(hart_id, inst.get_r0(), vd_bytes);
+        self.set_vreg_group_bytes(hart_id, inst.get_r0(), &vd_bytes, lmul);
         self.next_pc(hart_id)?;
         Ok(())
     }
 
     /// Execute vector load instructions
-    fn execute_vload(&mut self, hart_id: HartId, inst: &Instruction) -> Result<(), DebuggerError> {
+    fn execute_vload(&mut self, hart_id: HartId, inst: &Instruction, proc_idx: usize) -> Result<(), DebuggerError> {
         let name = inst.get_instruction_name().to_lowercase();
         let vl = self.get_vl(hart_id);
         let sew = self.get_elem_width(hart_id, &name);
+        let lmul = self.get_lmul(hart_id);
 
         if vl == 0 {
             self.next_pc(hart_id)?;
@@ -1667,7 +1721,7 @@ impl Machine {
             0
         };
         let vindex_bytes = if is_indexed {
-            Some(self.get_vreg_bytes(hart_id, inst.get_r2()))
+            Some(self.get_vreg_group_bytes(hart_id, inst.get_r2(), lmul))
         } else {
             None
         };
@@ -1678,17 +1732,18 @@ impl Machine {
                 let mut vd_bytes = vec![0u8; bytes_per_reg];
                 for b in 0..bytes_per_reg {
                     let addr = base_addr.wrapping_add((field * bytes_per_reg + b) as u64);
-                    vd_bytes[b] = self.memory.read_u8(addr)?;
+                    vd_bytes[b] = self.processors[proc_idx].memory.read_u8(addr)?;
                 }
                 let reg_idx = (vd_start_idx + field) % 32;
                 self.set_vreg_bytes_by_idx(hart_id, reg_idx, vd_bytes);
             }
         } else {
-            let mut vd_bytes = vec![0u8; 64];
+            let group_bytes = 64 * lmul;
+            let mut vd_bytes = vec![0u8; group_bytes];
 
             for i in 0..vl {
                 let byte_offset = i * sew;
-                if byte_offset + sew > 64 { break; }
+                if byte_offset + sew > group_bytes { break; }
 
                 let addr = if is_indexed {
                     let vindex = vindex_bytes.as_ref().unwrap();
@@ -1703,17 +1758,17 @@ impl Machine {
                 };
 
                 let val = match sew {
-                    1 => self.memory.read_u8(addr)? as u64,
-                    2 => self.memory.read_u16(addr)? as u64,
-                    4 => self.memory.read_u32(addr)? as u64,
-                    8 => self.memory.read_u64(addr)?,
-                    _ => self.memory.read_u64(addr)?,
+                    1 => self.processors[proc_idx].memory.read_u8(addr)? as u64,
+                    2 => self.processors[proc_idx].memory.read_u16(addr)? as u64,
+                    4 => self.processors[proc_idx].memory.read_u32(addr)? as u64,
+                    8 => self.processors[proc_idx].memory.read_u64(addr)?,
+                    _ => self.processors[proc_idx].memory.read_u64(addr)?,
                 };
 
                 Self::write_elem(&mut vd_bytes, byte_offset, sew, val);
             }
 
-            self.set_vreg_bytes(hart_id, inst.get_r0(), vd_bytes);
+            self.set_vreg_group_bytes(hart_id, inst.get_r0(), &vd_bytes, lmul);
         }
 
         self.next_pc(hart_id)?;
@@ -1721,10 +1776,11 @@ impl Machine {
     }
 
     /// Execute vector store instructions
-    fn execute_vstore(&mut self, hart_id: HartId, inst: &Instruction) -> Result<(), DebuggerError> {
+    fn execute_vstore(&mut self, hart_id: HartId, inst: &Instruction, proc_idx: usize) -> Result<(), DebuggerError> {
         let name = inst.get_instruction_name().to_lowercase();
         let vl = self.get_vl(hart_id);
         let sew = self.get_elem_width(hart_id, &name);
+        let lmul = self.get_lmul(hart_id);
 
         if vl == 0 {
             self.next_pc(hart_id)?;
@@ -1750,7 +1806,7 @@ impl Machine {
             0
         };
         let vindex_bytes = if is_indexed {
-            Some(self.get_vreg_bytes(hart_id, inst.get_r2()))
+            Some(self.get_vreg_group_bytes(hart_id, inst.get_r2(), lmul))
         } else {
             None
         };
@@ -1762,15 +1818,16 @@ impl Machine {
                 let vs_bytes = self.get_vreg_bytes_by_idx(hart_id, reg_idx);
                 for b in 0..bytes_per_reg {
                     let addr = base_addr.wrapping_add((field * bytes_per_reg + b) as u64);
-                    self.memory.write_u8(addr, vs_bytes.get(b).copied().unwrap_or(0));
+                    self.processors[proc_idx].memory.write_u8(addr, vs_bytes.get(b).copied().unwrap_or(0));
                 }
             }
         } else {
-            let vs3_bytes = self.get_vreg_bytes(hart_id, inst.get_r0());
+            let vs3_bytes = self.get_vreg_group_bytes(hart_id, inst.get_r0(), lmul);
 
+            let group_bytes = 64 * lmul;
             for i in 0..vl {
                 let byte_offset = i * sew;
-                if byte_offset + sew > 64 { break; }
+                if byte_offset + sew > group_bytes { break; }
 
                 let addr = if is_indexed {
                     let vindex = vindex_bytes.as_ref().unwrap();
@@ -1786,10 +1843,10 @@ impl Machine {
 
                 let val = Self::read_elem(&vs3_bytes, byte_offset, sew);
                 match sew {
-                    1 => self.memory.write_u8(addr, val as u8)?,
-                    2 => self.memory.write_u16(addr, val as u16)?,
-                    4 => self.memory.write_u32(addr, val as u32)?,
-                    8 => self.memory.write_u64(addr, val)?,
+                    1 => self.processors[proc_idx].memory.write_u8(addr, val as u8)?,
+                    2 => self.processors[proc_idx].memory.write_u16(addr, val as u16)?,
+                    4 => self.processors[proc_idx].memory.write_u32(addr, val as u32)?,
+                    8 => self.processors[proc_idx].memory.write_u64(addr, val)?,
                     _ => {}
                 }
             }
@@ -1805,6 +1862,7 @@ impl Machine {
         let vl = self.get_vl(hart_id);
         let sew = self.get_elem_width(hart_id, &name);
         let masked = Self::is_masked(inst);
+        let lmul = self.get_lmul(hart_id);
 
         if vl == 0 {
             self.next_pc(hart_id)?;
@@ -1812,18 +1870,19 @@ impl Machine {
         }
 
         let base_name = name.split('.').next().unwrap_or(&name);
-        let vs2_bytes = self.get_vreg_bytes(hart_id, inst.get_r1());
-        let vs1_bytes = self.get_vreg_bytes(hart_id, inst.get_r2());
+        let vs2_bytes = self.get_vreg_group_bytes(hart_id, inst.get_r1(), lmul);
+        let vs1_bytes = self.get_vreg_group_bytes(hart_id, inst.get_r2(), lmul);
 
         let vs1_elem = Self::read_elem(&vs1_bytes, 0, sew);
         let mut result = vs1_elem;
 
+        let group_bytes = 64 * lmul;
         for i in 0..vl {
             let byte_offset = i * sew;
-            if byte_offset + sew > 64 { break; }
+            if byte_offset + sew > group_bytes { break; }
 
             if masked {
-                let v0_bytes = self.get_vreg_bytes(hart_id, Some(&"v0".to_string()));
+                let v0_bytes = self.get_vreg_group_bytes(hart_id, Some(&"v0".to_string()), lmul);
                 let mask_byte = v0_bytes.get(byte_offset).copied().unwrap_or(0);
                 if mask_byte & 1 == 0 { continue; }
             }
@@ -1957,17 +2016,17 @@ impl Machine {
     }
 
     fn execute_inst(&mut self, hart_id: HartId, inst: &Instruction) -> Result<(), DebuggerError> {
+        let proc_idx = self.get_processor_index(hart_id)
+            .ok_or_else(|| DebuggerError::HartNotFound { hart_id })?;
+
         // Check if this is a vector instruction (name starts with 'v')
         let name = inst.get_instruction_name();
         if name.to_lowercase().starts_with('v') {
-            return self.execute_vector_inst(hart_id, inst);
+            return self.execute_vector_inst(hart_id, inst, proc_idx);
         }
 
         let opcode = inst.get_op_code()
                     .map_err(|x| DebuggerError::GeneralError(x.get_error_message()))?;
-
-        let proc_idx = self.get_processor_index(hart_id)
-            .ok_or_else(|| DebuggerError::HartNotFound { hart_id })?;
 
         match opcode {
             OpCode::Add => self.binary_operation(hart_id, &inst, u64::wrapping_add)?,
@@ -2551,11 +2610,12 @@ impl Machine {
             OpCode::Jalr => {
                 let base = self.get_x(hart_id, inst.get_r1())?;
                 let imm = self.get_resolved_i64(hart_id, inst)?;
-                // P0-5: Clear the lowest 2 bits (& !3) for 4-byte alignment.
-                // The simulator only supports standard 4-byte RISC-V instructions;
-                // 2-byte-aligned-but-not-4-byte-aligned targets would miss the
-                // inst_cache lookup and silently mark the hart as Finished.
-                let target = base.wrapping_add_signed(imm) as usize & !3usize;
+                // P0-5: Clear the lowest bit (& !1) for 2-byte alignment as
+                // required by the RISC-V spec (compressed instructions use
+                // 2-byte boundaries). The inst_cache is built using actual
+                // instruction lengths, so 2-byte-aligned targets resolve
+                // correctly.
+                let target = base.wrapping_add_signed(imm) as usize & !1usize;
                 let return_pc = self.get_pc(hart_id)? + PC_INCREMENT;
 
                 self.set_x(
@@ -2877,7 +2937,8 @@ impl Machine {
             }
             OpCode::Fmvxw => {
                 let val = self.get_f32(hart_id, inst.get_r1())?;
-                self.set_x(hart_id, inst.get_r0(), val.to_bits() as u64);
+                // RV64: sign-extend bits 31:0 into bits 63:32
+                self.set_x(hart_id, inst.get_r0(), (val.to_bits() as i32 as i64) as u64);
                 self.next_pc(hart_id)?;
             }
             OpCode::Fmvwx => {
@@ -3055,16 +3116,16 @@ impl Machine {
                 let base = self.get_x(hart_id, inst.get_r1())?;
                 let imm = self.get_resolved_i64(hart_id, inst)?;
                 let addr = base.wrapping_add_signed(imm);
-                let bits = self.memory.read_u32(addr)?;
+                let bits = self.processors[proc_idx].memory.read_u32(addr)?;
                 self.set_f32(hart_id, inst.get_r0(), f32::from_bits(bits));
                 self.next_pc(hart_id)?;
             }
             OpCode::Fsw => {
-                let val = self.get_f32(hart_id, inst.get_r0())?;
-                let base = self.get_x(hart_id, inst.get_r1())?;
+                let val = self.get_f32(hart_id, inst.get_r2())?; // rs2 = float reg to store
+                let base = self.get_x(hart_id, inst.get_r1())?;  // rs1 = base address
                 let imm = self.get_resolved_i64(hart_id, inst)?;
                 let addr = base.wrapping_add_signed(imm);
-                self.memory.write_u32(addr, val.to_bits());
+                self.processors[proc_idx].memory.write_u32(addr, val.to_bits());
                 self.next_pc(hart_id)?;
             }
             // ============================================================
@@ -3301,7 +3362,7 @@ impl Machine {
                 let base = self.get_x(hart_id, inst.get_r1())?;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = base.wrapping_add(imm);
-                let val = self.memory.read_u32(addr)? as i32 as i64 as u64;
+                let val = self.processors[proc_idx].memory.read_u32(addr)? as i32 as i64 as u64;
                 self.set_x(hart_id, inst.get_r0(), val);
                 self.next_pc_by(hart_id, 2)?;
             }
@@ -3311,7 +3372,7 @@ impl Machine {
                 let sp = self.get_hart(hart_id).unwrap().x.regs[2].value;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = sp.wrapping_add(imm);
-                let val = self.memory.read_u32(addr)? as i32 as i64 as u64;
+                let val = self.processors[proc_idx].memory.read_u32(addr)? as i32 as i64 as u64;
                 self.set_x(hart_id, inst.get_r0(), val);
                 self.next_pc_by(hart_id, 2)?;
             }
@@ -3320,7 +3381,7 @@ impl Machine {
                 let base = self.get_x(hart_id, inst.get_r1())?;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = base.wrapping_add(imm);
-                let val = self.memory.read_u64(addr)?;
+                let val = self.processors[proc_idx].memory.read_u64(addr)?;
                 self.set_x(hart_id, inst.get_r0(), val);
                 self.next_pc_by(hart_id, 2)?;
             }
@@ -3330,7 +3391,7 @@ impl Machine {
                 let sp = self.get_hart(hart_id).unwrap().x.regs[2].value;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = sp.wrapping_add(imm);
-                let val = self.memory.read_u64(addr)?;
+                let val = self.processors[proc_idx].memory.read_u64(addr)?;
                 self.set_x(hart_id, inst.get_r0(), val);
                 self.next_pc_by(hart_id, 2)?;
             }
@@ -3339,7 +3400,7 @@ impl Machine {
                 let base = self.get_x(hart_id, inst.get_r1())?;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = base.wrapping_add(imm);
-                let val = self.memory.read_u64(addr)?;
+                let val = self.processors[proc_idx].memory.read_u64(addr)?;
                 self.set_x(hart_id, inst.get_r0(), val);
                 self.next_pc_by(hart_id, 2)?;
             }
@@ -3349,7 +3410,7 @@ impl Machine {
                 let sp = self.get_hart(hart_id).unwrap().x.regs[2].value;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = sp.wrapping_add(imm);
-                let val = self.memory.read_u64(addr)?;
+                let val = self.processors[proc_idx].memory.read_u64(addr)?;
                 self.set_x(hart_id, inst.get_r0(), val);
                 self.next_pc_by(hart_id, 2)?;
             }
@@ -3360,7 +3421,7 @@ impl Machine {
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = base.wrapping_add(imm);
                 let val = self.get_x(hart_id, inst.get_r1())? as u32;
-                self.memory.write_u32(addr, val);
+                self.processors[proc_idx].memory.write_u32(addr, val);
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.SWSP: Store word to stack pointer
@@ -3370,7 +3431,7 @@ impl Machine {
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = sp.wrapping_add(imm);
                 let val = self.get_x(hart_id, inst.get_r0())? as u32;
-                self.memory.write_u32(addr, val);
+                self.processors[proc_idx].memory.write_u32(addr, val);
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.SD: Store doubleword to memory
@@ -3380,7 +3441,7 @@ impl Machine {
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = base.wrapping_add(imm);
                 let val = self.get_x(hart_id, inst.get_r1())?;
-                self.memory.write_u64(addr, val);
+                self.processors[proc_idx].memory.write_u64(addr, val);
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.SDSP: Store doubleword to stack pointer
@@ -3390,7 +3451,7 @@ impl Machine {
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = sp.wrapping_add(imm);
                 let val = self.get_x(hart_id, inst.get_r0())?;
-                self.memory.write_u64(addr, val);
+                self.processors[proc_idx].memory.write_u64(addr, val);
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.SQ: Store quadword - simplified to store 64 bits
@@ -3400,7 +3461,7 @@ impl Machine {
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = base.wrapping_add(imm);
                 let val = self.get_x(hart_id, inst.get_r1())?;
-                self.memory.write_u64(addr, val);
+                self.processors[proc_idx].memory.write_u64(addr, val);
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.SQSP: Store quadword to stack pointer - simplified
@@ -3410,7 +3471,7 @@ impl Machine {
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = sp.wrapping_add(imm);
                 let val = self.get_x(hart_id, inst.get_r0())?;
-                self.memory.write_u64(addr, val);
+                self.processors[proc_idx].memory.write_u64(addr, val);
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.FLW: Load float (single-precision)
@@ -3418,7 +3479,7 @@ impl Machine {
                 let base = self.get_x(hart_id, inst.get_r1())?;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = base.wrapping_add(imm);
-                let val = self.memory.read_u32(addr)?;
+                let val = self.processors[proc_idx].memory.read_u32(addr)?;
                 self.set_f32(hart_id, inst.get_r0(), f32::from_bits(val));
                 self.next_pc_by(hart_id, 2)?;
             }
@@ -3428,7 +3489,7 @@ impl Machine {
                 let sp = self.get_hart(hart_id).unwrap().x.regs[2].value;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = sp.wrapping_add(imm);
-                let val = self.memory.read_u32(addr)?;
+                let val = self.processors[proc_idx].memory.read_u32(addr)?;
                 self.set_f32(hart_id, inst.get_r0(), f32::from_bits(val));
                 self.next_pc_by(hart_id, 2)?;
             }
@@ -3437,7 +3498,7 @@ impl Machine {
                 let base = self.get_x(hart_id, inst.get_r1())?;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = base.wrapping_add(imm);
-                let val = self.memory.read_u64(addr)?;
+                let val = self.processors[proc_idx].memory.read_u64(addr)?;
                 self.set_f(hart_id, inst.get_r0(), f64::from_bits(val));
                 self.next_pc_by(hart_id, 2)?;
             }
@@ -3447,17 +3508,18 @@ impl Machine {
                 let sp = self.get_hart(hart_id).unwrap().x.regs[2].value;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = sp.wrapping_add(imm);
-                let val = self.memory.read_u64(addr)?;
+                let val = self.processors[proc_idx].memory.read_u64(addr)?;
                 self.set_f(hart_id, inst.get_r0(), f64::from_bits(val));
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.FSW: Store float
+            // PEG: c.fsw rs1, rs2, imm → r0=rs1(base), r1=rs2(value)
             OpCode::Cfsw => {
-                let base = self.get_x(hart_id, inst.get_r1())?;
+                let base = self.get_x(hart_id, inst.get_r0())?;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = base.wrapping_add(imm);
-                let val = self.get_f32(hart_id, inst.get_r0())?;
-                self.memory.write_u32(addr, val.to_bits());
+                let val = self.get_f32(hart_id, inst.get_r1())?;
+                self.processors[proc_idx].memory.write_u32(addr, val.to_bits());
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.FSWSP: Store float to stack pointer
@@ -3467,16 +3529,17 @@ impl Machine {
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = sp.wrapping_add(imm);
                 let val = self.get_f32(hart_id, inst.get_r0())?;
-                self.memory.write_u32(addr, val.to_bits());
+                self.processors[proc_idx].memory.write_u32(addr, val.to_bits());
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.FSD: Store double
+            // PEG: c.fsd rs1, rs2, imm → r0=rs1(base), r1=rs2(value)
             OpCode::Cfsd => {
-                let base = self.get_x(hart_id, inst.get_r1())?;
+                let base = self.get_x(hart_id, inst.get_r0())?;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = base.wrapping_add(imm);
-                let val = self.get_f(hart_id, inst.get_r0())?;
-                self.memory.write_u64(addr, val.to_bits());
+                let val = self.get_f(hart_id, inst.get_r1())?;
+                self.processors[proc_idx].memory.write_u64(addr, val.to_bits());
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.FSDSP: Store double to stack pointer
@@ -3486,7 +3549,7 @@ impl Machine {
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = sp.wrapping_add(imm);
                 let val = self.get_f(hart_id, inst.get_r0())?;
-                self.memory.write_u64(addr, val.to_bits());
+                self.processors[proc_idx].memory.write_u64(addr, val.to_bits());
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.ADDI4SPN: Add immediate * 4 to sp, store in rd
@@ -3649,7 +3712,7 @@ impl Machine {
                 if rs1 == 0 {
                     let offset = self.get_i64_from_imm(hart_id, inst.get_imm())?;
                     let hart = self.get_hart_mut(hart_id).unwrap();
-                    hart.pc = ((hart.pc as i64).wrapping_add(offset)) as usize;
+                    hart.pc = ((hart.pc as i64).wrapping_add(offset)) as usize & !1usize;
                 } else {
                     self.next_pc_by(hart_id, 2)?;
                 }
@@ -3660,7 +3723,7 @@ impl Machine {
                 if rs1 != 0 {
                     let offset = self.get_i64_from_imm(hart_id, inst.get_imm())?;
                     let hart = self.get_hart_mut(hart_id).unwrap();
-                    hart.pc = ((hart.pc as i64).wrapping_add(offset)) as usize;
+                    hart.pc = ((hart.pc as i64).wrapping_add(offset)) as usize & !1usize;
                 } else {
                     self.next_pc_by(hart_id, 2)?;
                 }
@@ -3669,7 +3732,7 @@ impl Machine {
             OpCode::Cj => {
                 let offset = self.get_i64_from_imm(hart_id, inst.get_imm())?;
                 let hart = self.get_hart_mut(hart_id).unwrap();
-                hart.pc = ((hart.pc as i64).wrapping_add(offset)) as usize;
+                hart.pc = ((hart.pc as i64).wrapping_add(offset)) as usize & !1usize;
             }
             // C.JAL: Jump and link (RV32 only, save return address in ra)
             OpCode::Cjal => {
@@ -3677,13 +3740,13 @@ impl Machine {
                 let offset = self.get_i64_from_imm(hart_id, inst.get_imm())?;
                 let hart = self.get_hart_mut(hart_id).unwrap();
                 hart.x.regs[ra_idx].value = (hart.pc + 2) as u64;
-                hart.pc = ((hart.pc as i64).wrapping_add(offset)) as usize;
+                hart.pc = ((hart.pc as i64).wrapping_add(offset)) as usize & !1usize;
             }
             // C.JR: Jump register (rs1 = target, rd = x0 for C.JR)
             OpCode::Cjr => {
                 let target = self.get_x(hart_id, inst.get_r1())?;
                 let hart = self.get_hart_mut(hart_id).unwrap();
-                hart.pc = target as usize;
+                hart.pc = (target & !1u64) as usize;
             }
             // C.JALR: Jump and link register
             OpCode::Cjalr => {
@@ -3691,7 +3754,7 @@ impl Machine {
                 let ra_idx = self.registers.get_register_value(Some(&"ra".to_string())).unwrap() as usize;
                 let hart = self.get_hart_mut(hart_id).unwrap();
                 hart.x.regs[ra_idx].value = (hart.pc + 2) as u64;
-                hart.pc = target as usize;
+                hart.pc = (target & !1u64) as usize;
             }
             // C.EBREAK: Breakpoint (same as EBREAK but compact)
             OpCode::Cebreak => {
@@ -3778,7 +3841,12 @@ impl Machine {
             // ECALL: Environment call (trap to higher privilege)
             OpCode::Ecall => {
                 let hart = self.get_hart_mut(hart_id).unwrap();
-                hart.take_trap(EXCEPTION_ENVIRONMENT_CALL_FROM_M, hart.pc as u64, false);
+                let cause = match hart.privilege {
+                    PrivilegeLevel::User => EXCEPTION_ENVIRONMENT_CALL_FROM_U,
+                    PrivilegeLevel::Supervisor => EXCEPTION_ENVIRONMENT_CALL_FROM_S,
+                    PrivilegeLevel::Machine => EXCEPTION_ENVIRONMENT_CALL_FROM_M,
+                };
+                hart.take_trap(cause, hart.pc as u64, false);
             }
             // EBREAK: Environment breakpoint
             OpCode::Ebreak => {
@@ -3802,7 +3870,34 @@ impl Machine {
                 hart.write_csr(0x300, (mstatus & !(1 << 3)) | (mpie << 3));
                 // Set MPIE = 1
                 hart.write_csr(0x300, hart.read_csr(0x300) | (1 << 7));
+                // Clear MPP to 0 (User mode) per RISC-V spec
+                hart.write_csr(0x300, hart.read_csr(0x300) & !(0x3 << 11));
                 hart.pc = mepc as usize;
+            }
+            // SRET: Supervisor trap return
+            OpCode::Sret => {
+                let hart = self.get_hart_mut(hart_id).unwrap();
+                let sepc = hart.read_csr(0x141); // sepc
+                let mstatus = hart.read_csr(0x300);
+                // Set privilege to SPP (bit 8 of mstatus)
+                let spp = (mstatus >> 8) & 1;
+                hart.privilege = match spp {
+                    0 => PrivilegeLevel::User,
+                    _ => PrivilegeLevel::Supervisor,
+                };
+                // Set SIE = SPIE (restore previous interrupt enable)
+                let spie = (mstatus >> 5) & 1;
+                hart.write_csr(0x300, (mstatus & !(1 << 1)) | (spie << 1));
+                // Set SPIE = 1
+                hart.write_csr(0x300, hart.read_csr(0x300) | (1 << 5));
+                // Clear SPP to 0 (User mode) per RISC-V spec
+                hart.write_csr(0x300, hart.read_csr(0x300) & !(1 << 8));
+                hart.pc = sepc as usize;
+            }
+            // URET: User trap return
+            OpCode::Uret => {
+                let hart = self.get_hart_mut(hart_id).unwrap();
+                hart.pc = hart.read_csr(0x041) as usize; // uepc
             }
             // WFI: Wait for interrupt (treated as NOP for now)
             OpCode::Wfi => {

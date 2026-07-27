@@ -19,7 +19,7 @@ impl IntegerRegisterFile {
         }
         if reg >= self.regs.len() {
             log::error!(
-                "IntegerRegisterFile::read: index {} out of bounds (max {}) �� returning 0 (this masks a bug in the caller)",
+                "IntegerRegisterFile::read: index {} out of bounds (max {}) returning 0 (this masks a bug in the caller)",
                 reg,
                 self.regs.len().saturating_sub(1)
             );
@@ -34,7 +34,7 @@ impl IntegerRegisterFile {
         }
         if reg >= self.regs.len() {
             log::error!(
-                "IntegerRegisterFile::write: index {} out of bounds (max {}) �� write dropped (this masks a bug in the caller)",
+                "IntegerRegisterFile::write: index {} out of bounds (max {}) write dropped (this masks a bug in the caller)",
                 reg,
                 self.regs.len().saturating_sub(1)
             );
@@ -68,7 +68,7 @@ impl FloatRegisterFile {
     pub fn read(&self, reg: usize) -> u64 {
         if reg >= self.regs.len() {
             log::error!(
-                "FloatRegisterFile::read: index {} out of bounds (max {}) �� returning 0 (this masks a bug in the caller)",
+                "FloatRegisterFile::read: index {} out of bounds (max {}) returning 0 (this masks a bug in the caller)",
                 reg,
                 self.regs.len().saturating_sub(1)
             );
@@ -80,7 +80,7 @@ impl FloatRegisterFile {
     pub fn write(&mut self, reg: usize, value: u64) {
         if reg >= self.regs.len() {
             log::error!(
-                "FloatRegisterFile::write: index {} out of bounds (max {}) �� write dropped (this masks a bug in the caller)",
+                "FloatRegisterFile::write: index {} out of bounds (max {}) write dropped (this masks a bug in the caller)",
                 reg,
                 self.regs.len().saturating_sub(1)
             );
@@ -279,7 +279,6 @@ impl Default for CsrFile {
 /// Privilege levels for RISC-V
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrivilegeLevel {
-pub enum PrivilegeLevel {
     User = 0,
     Supervisor = 1,
     Machine = 3,
@@ -321,7 +320,7 @@ pub struct HartPerformance {
 }
 
 impl HartPerformance {
-    /// Instructions per cycle — based on actual execution cycles.
+    /// Instructions per cycle based on actual execution cycles.
     pub fn ipc(&self) -> f64 {
         if self.exec_cycles > 0 {
             self.inst_count as f64 / self.exec_cycles as f64
@@ -354,6 +353,15 @@ pub const MSTATUS_MPP_MASK: u64 = 0x3 << 11; // Machine previous privilege mask
 pub const MSTATUS_MPP_M: u64 = 3 << 11;      // Machine previous privilege = Machine
 
 pub const PC_INCREMENT: usize = 4;
+
+/// Vector execution state (VL, SEW, LMUL)
+#[derive(Clone, Debug, Default)]
+pub struct VectorState {
+    pub vl: usize,
+    pub sew: usize,
+    pub lmul: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct Hart {
     pub id: u64,
@@ -430,7 +438,7 @@ impl Hart {
             if sie {
                 self.csr.mstatus |= MSTATUS_SPIE;
             }
-            self.csr.mstatus = (self.csr.mstatus & !MSTATUS_SPP) | (priv_val << 8);
+            self.csr.mstatus = (self.csr.mstatus & !MSTATUS_SPP) | ((priv_val & 1) << 8);
             self.privilege = PrivilegeLevel::Supervisor;
             // Jump to supervisor trap handler
             self.pc = self.csr.stvec as usize;
@@ -490,10 +498,13 @@ impl Hart {
         }
     }
 
-    /// Check if a trap should be delegated to a lower privilege level
+    /// Check if a trap should be delegated to supervisor mode.
+    /// RISC-V privileged spec: traps from M-mode are always handled in M-mode.
+    /// Traps from S/U-mode check medeleg/mideleg; if the corresponding bit is
+    /// set the trap is delegated to S-mode, otherwise it stays in M-mode.
     fn is_trap_delegated(&self, cause: u64, is_interrupt: bool) -> PrivilegeLevel {
-        if self.privilege != PrivilegeLevel::Machine {
-            return PrivilegeLevel::Machine; // Can't delegate from lower modes
+        if self.privilege == PrivilegeLevel::Machine {
+            return PrivilegeLevel::Machine; // M-mode traps always handled in M-mode
         }
         if is_interrupt {
             if (self.csr.mideleg & (1 << cause)) != 0 {
@@ -533,7 +544,7 @@ impl Hart {
 
             RegisterType::Float => {
                 let bits = self.f.read(reg.index);
-                // P0-7/P0-11: Detect RISC-V NaN-boxing �� single-precision
+                // P0-7/P0-11: Detect RISC-V NaN-boxing single-precision
                 // values have upper 32 bits set to 0xFFFFFFFF, which would
                 // be parsed as NaN by f64::from_bits.  When NaN-boxed,
                 // interpret the low 32 bits as f32 instead.
@@ -595,7 +606,7 @@ impl Hart {
             (RegisterType::Csr, RuntimeValue::Integer(v)) => {
                 match reg.index {
                     // P0-5: mhartid is a read-only hardware thread ID register
-                    // per RISC-V privileged spec ��3.1.1. Allowing writes would
+                    // per RISC-V privileged spec 3.1.1. Allowing writes would
                     // corrupt hart identity in multi-hart scenarios (thread
                     // ordering, performance counters, breakpoint maps, etc.).
                     CSR_MHARTID | CSR_VL | CSR_VTYPE => {
@@ -609,14 +620,11 @@ impl Hart {
                             format!("{} is a read-only CSR per RISC-V spec", name)
                         ));
                     }
-                    _ => return Err(DebuggerError::RegisterWriteError(
-                        format!("unsupported CSR index: {:#x}", reg.index)
-                    )),
+                    _ => {
+                        // reg.index holds the CSR address
+                        self.write_csr(reg.index as u64, v);
+                    }
                 }
-            }
-            (RegisterType::Csr, RuntimeValue::Integer(v)) => {
-                // reg.index holds the CSR address
-                self.write_csr(reg.index as u64, v);
             }
 
             (unexpected_type, unexpected_value) => {
@@ -741,6 +749,7 @@ impl Default for Hart {
             x: IntegerRegisterFile::default(),
             f: FloatRegisterFile::default(),
             v: VectorRegisterFile::default(),
+            vector_state: VectorState::default(),
             csr: CsrFile::default(),
             reservation: None,
             privilege: PrivilegeLevel::Machine,

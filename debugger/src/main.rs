@@ -11,7 +11,7 @@ use core_utils::log::init_logger;
 use riscv_asm_lib::r5asm::assembler::*;
 
 use crate::machine::machine::Machine;
-use crate::machine::hart::{HartState, PC_INCREMENT};
+use crate::machine::hart::HartState;
 use crate::machine::register_ref::{RegisterRef, RegisterType};
 use crate::machine::runtime_value::RuntimeValue;
 
@@ -105,7 +105,7 @@ const FP_REG_BASE: i64 = 2000;
 const PERF_BASE: i64 = 3000;
 const MACHINE_BASE: i64 = 4000;
 
-/// Convert DAP thread_id → hart_id.  Thread IDs start at 1, hart IDs start at 0.
+/// Convert DAP thread_id 鈫� hart_id.  Thread IDs start at 1, hart IDs start at 0.
 /// Returns u64 to match HartId type exactly, avoiding 32-bit truncation.
 fn thread_id_to_hart_id(thread_id: i64) -> u64 {
     if thread_id > 0 {
@@ -129,7 +129,7 @@ fn encode_vref(scope_base: i64, hart_id: u64) -> i64 {
 fn decode_vref(vr: i64) -> Option<(i64, u64)> {
     let base = (vr / 1000) * 1000;
     let offset = vr - base;
-    // Only decode positive offsets — negative would indicate a corrupted ref.
+    // Only decode positive offsets 鈥� negative would indicate a corrupted ref.
     let hart_id = if offset >= 0 { offset as u64 } else { return None; };
     match base {
         INT_REG_BASE | FP_REG_BASE | PERF_BASE | MACHINE_BASE => Some((base, hart_id)),
@@ -155,10 +155,9 @@ fn hart_id_from_vref(vr: i64, selected_hart_id: u64) -> u64 {
 /// (NaN-boxing).  If we blindly interpret such a pattern as f64, it shows NaN.
 /// This helper detects the boxing and formats the value as f32 instead.
 fn format_float_reg(bits: u64) -> String {
-    if (bits >> 32) == 0xFFFFFFFF {
-        format!("{} (f32)", f32::from_bits(bits as u32))
-    } else {
-        format!("{}", f64::from_bits(bits))
+    match (bits >> 32) == 0xFFFFFFFF {
+        true => format!("{} (f32)", f32::from_bits(bits as u32)),
+        false => format!("{}", f64::from_bits(bits)),
     }
 }
 
@@ -172,7 +171,7 @@ const INT_REG_NAMES: [&str; 32] = [
 
 fn init_debugger_logger(log_file: &str) {
     // Try to initialize file-based logger; fall back to silent if anything fails.
-    // Don't unwrap — logging failure must not crash the debugger.
+    // Don't unwrap 鈥� logging failure must not crash the debugger.
     let logfile = match FileAppender::builder()
         .encoder(Box::new(
             PatternEncoder::new(
@@ -246,25 +245,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut machine: Option<Machine> = None;
     let mut current_line: usize = 1;
     let mut offset_to_line_map: HashMap<usize, HashMap<usize, usize>> = HashMap::new();
-    // Reverse map: program_id → source_line → Vec<offset>.
+    // Reverse map: program_id 鈫� source_line 鈫� Vec<offset>.
     // Built alongside offset_to_line_map so breakpoint logic can map a line to
     // all instructions at that line (needed for stepping past multi-instruction
     // source lines in Continue when hitting a breakpoint).
     let mut line_to_offsets: HashMap<usize, HashMap<usize, Vec<usize>>> = HashMap::new();
-    // Source file path → program_id mapping, built during Launch so
+    // Source file path 鈫� program_id mapping, built during Launch so
     // SetBreakpoints/GotoTargets/BreakpointLocations can match by source.path.
     let mut source_to_program: HashMap<String, usize> = HashMap::new();
-    // Breakpoints keyed by (program_id → line → bp_id).
+    // Breakpoints keyed by (program_id 鈫� line 鈫� bp_id).
     // Storing per-program avoids false hits when different programs share line numbers.
     let mut breakpoints_map: HashMap<usize, HashMap<i64, i64>> = HashMap::new();
     // P0-16: Globally unique breakpoint ID allocator shared by all programs.
     // DAP requires breakpoint IDs to be unique across the entire session so
     // hit_breakpoint_ids in StoppedEvent can be disambiguated without a source reference.
     let mut next_bp_id: i64 = 1;
-    // Monotonically increasing frame ID — VS Code uses this to detect that
+    // Monotonically increasing frame ID 鈥� VS Code uses this to detect that
     // the stack has changed and will re-request Scopes/Variables.
     let mut frame_id_counter: i64 = 0;
-    // Maps frame_id → hart_id so RestartFrame can resolve the correct hart
+    // Maps frame_id 鈫� hart_id so RestartFrame can resolve the correct hart
     // even when the user has been browsing frames from different threads.
     let mut frame_to_hart: HashMap<i64, u64> = HashMap::new();
     // Currently selected hart ID (set during StackTrace, used by Variables)
@@ -312,7 +311,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 server.respond(req.success(rsp))?;
 
-                // 🔥 REQUIRED: tell VS Code debugger is ready
+                // 馃敟 REQUIRED: tell VS Code debugger is ready
                 server.send_event(Event::Initialized)?;
             }
             Command::BreakpointLocations(args) => {
@@ -364,7 +363,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .map(|s| s.to_string());
                 log::info!("program path: {:?}", program_path);
 
-                // P0-3: Reset frame→hart mappings on new session.
+                // P0-3: Reset frame鈫抙art mappings on new session.
                 frame_to_hart.clear();
 
                 // load and assemble the .rv.s file
@@ -465,7 +464,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Bump frame id so VS Code knows this is a new stop and
                 // will re-request Scopes/Variables rather than reusing cached data.
                 frame_id_counter += 1;
-                // Record frame → hart mapping so RestartFrame can resolve
+                // Record frame 鈫� hart mapping so RestartFrame can resolve
                 // the correct hart even when browsing frames from other threads.
                 frame_to_hart.insert(frame_id_counter, hart_id);
 
@@ -494,7 +493,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Command::StepIn(args) => {
                 log::info!("STEP IN, thread_id={}", args.thread_id);
-                // P0-3: Clear stale frame→hart mappings from previous stop cycle.
+                // P0-3: Clear stale frame鈫抙art mappings from previous stop cycle.
                 // New StackTrace requests will populate fresh entries.
                 frame_to_hart.clear();
                 let hart_id = thread_id_to_hart_id(args.thread_id);
@@ -528,7 +527,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .and_then(|bp_table| bp_table.get(&(current_line as i64)))
                     .copied();
                 let stop_reason = if hit_bp_id.is_some() { types::StoppedEventReason::Breakpoint } else { types::StoppedEventReason::Step };
-                let hit_ids: Vec<i64> = if let Some(id) = hit_bp_id { vec![id] } else { vec![] };
+                let hit_ids: Vec<i64> = hit_bp_id.map(|id| vec![id]).unwrap_or_default();
                 let desc = if hit_bp_id.is_some() { "breakpoint hit" } else { "step in" }; 
 
                 // Send StoppedEvent BEFORE response so VSCode enters stopped state
@@ -547,7 +546,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Command::Next(args) => {
                 log::info!("STEP OVER, thread_id={}", args.thread_id);
-                // P0-3: Clear stale frame→hart mappings from previous stop cycle.
+                // P0-3: Clear stale frame鈫抙art mappings from previous stop cycle.
                 frame_to_hart.clear();
                 let hart_id = thread_id_to_hart_id(args.thread_id);
                 selected_hart_id = hart_id;
@@ -580,7 +579,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .and_then(|bp_table| bp_table.get(&(current_line as i64)))
                     .copied();
                 let stop_reason = if hit_bp_id.is_some() { types::StoppedEventReason::Breakpoint } else { types::StoppedEventReason::Step };
-                let hit_ids: Vec<i64> = if let Some(id) = hit_bp_id { vec![id] } else { vec![] };
+                let hit_ids: Vec<i64> = hit_bp_id.map(|id| vec![id]).unwrap_or_default();
                 let desc = if hit_bp_id.is_some() { "breakpoint hit" } else { "step next" }; 
 
                 // Send StoppedEvent BEFORE response so VSCode enters stopped state
@@ -602,7 +601,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let hart_id = thread_id_to_hart_id(args.thread_id);
                 selected_hart_id = hart_id;
 
-                // P0-3: Clear stale frame→hart mappings from previous stop
+                // P0-3: Clear stale frame鈫抙art mappings from previous stop
                 // cycle. New StackTrace calls will populate fresh entries.
                 frame_to_hart.clear();
 
@@ -613,7 +612,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut steps = 0;
                 let mut paused_by_user = false;
                 // P0-1: Poll DAP every 10 instructions (was 1000) so runtime
-                // SetBreakpoints take effect with ≤10-instruction latency.
+                // SetBreakpoints take effect with 鈮�10-instruction latency.
                 // A PeekNamedPipe on every 10th step is negligible overhead.
                 const DAP_POLL_INTERVAL: usize = 10;
 
@@ -626,15 +625,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // modification), Continue would execute the breakpoint-line
                     // instruction first and then stop at the NEXT instruction,
                     // silently skipping the breakpoint.
-                    // In multi-hart mode, check ALL harts — not just the selected one.
+                    // In multi-hart mode, check ALL harts 鈥� not just the selected one.
                     {
-                        let harts_to_check: Vec<u64> = if use_parallel {
-                            m.get_all_harts().iter().map(|(_, h)| h.id).collect()
-                        } else {
-                            vec![hart_id]
+                        let harts_to_check: Vec<u64> = match use_parallel {
+                            true => m.get_all_harts().iter().map(|(_, h)| h.id).collect(),
+                            false => vec![hart_id],
                         };
                         for &hid in &harts_to_check {
-                            // P0-22: Extract line from PC→line lookup so
+                            // P0-22: Extract line from PC鈫抣ine lookup so
                             // current_line stays in sync with the bp-hitting
                             // hart (previously the closure chain discarded it).
                             let bp_hit = m.get_hart(hid).and_then(|h| {
@@ -713,6 +711,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     m.step_hart(bp_hart_id)
                                 };
                                 if step_res.is_err() {
+                                    log::error!(
+                                        "continue: step past breakpoint line failed for hart {}: {:?}",
+                                        bp_hart_id, step_res
+                                    );
+                                    had_execution_error = true;
                                     break;
                                 }
                                 // Update current_line from the selected hart
@@ -726,21 +729,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
-                        // Reset breakpoint flags — we've stepped past the line
-                        hit_breakpoint = false;
-                        hit_bp_ids.clear();
+                        if had_execution_error {
+                            // Step-past loop failed 鈥� keep breakpoint flag
+                            // to enter the stop path and report the error.
+                            hit_bp_ids.clear();
+                        } else {
+                            // Reset breakpoint flags 鈥� we've stepped past the line
+                            hit_breakpoint = false;
+                            hit_bp_ids.clear();
+                        }
 
                         // P0-14: After stepping past the original breakpoint line,
                         // check whether any hart's PC now lands on the NEXT line's
                         // breakpoint BEFORE entering the main execution loop.
                         // The main loop is "step first, check later", so if line N+1
                         // also has a breakpoint, its first instruction would be
-                        // executed before detection — violating "stop before
+                        // executed before detection 鈥� violating "stop before
                         // execution" semantics for consecutive breakpoint lines.
-                        let bp_check_harts: Vec<u64> = if use_parallel {
-                            m.get_all_harts().iter().map(|(_, h)| h.id).collect()
-                        } else {
-                            vec![bp_hart_id]
+                        let bp_check_harts: Vec<u64> = match use_parallel {
+                            true => m.get_all_harts().iter().map(|(_, h)| h.id).collect(),
+                            false => vec![bp_hart_id],
                         };
                         for &hid in &bp_check_harts {
                             if let Some(hart) = m.get_hart(hid) {
@@ -768,12 +776,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     if hit_breakpoint {
-                        // P0-24/P1-21: PC is already at a breakpoint line
-                        // after pre-loop stepping.  Notify VSCode and respond
-                        // to Continue so the UI shows the current state.
-                        let desc = format!("breakpoint hit at line {}", current_line);
+                        let (reason, desc) = if had_execution_error {
+                            // Step-past loop hit an execution error 鈥� report as exception
+                            let err_msg = m.get_hart(selected_hart_id)
+                                .and_then(|h| h.error_info.clone())
+                                .unwrap_or_else(|| format!("hart {} execution error", selected_hart_id));
+                            (types::StoppedEventReason::Exception, format!("execution error: {}", err_msg))
+                        } else {
+                            // P0-24/P1-21: PC is already at a breakpoint line
+                            // after pre-loop stepping.  Notify VSCode and respond
+                            // to Continue so the UI shows the current state.
+                            (types::StoppedEventReason::Breakpoint, format!("breakpoint hit at line {}", current_line))
+                        };
                         server.send_event(Event::Stopped(StoppedEventBody {
-                            reason: types::StoppedEventReason::Breakpoint,
+                            reason,
                             description: Some(desc),
                             thread_id: Some((selected_hart_id as i64) + 1),
                             preserve_focus_hint: Some(false),
@@ -834,7 +850,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         ..Default::default()
                                     }))?;
                                     had_execution_error = true;
-                                    // P0-26: Don't set should_terminate here — let the
+                                    // P0-26: Don't set should_terminate here 鈥� let the
                                     // all_finished check below handle termination, so
                                     // remaining Running harts can continue executing.
                                 }
@@ -842,10 +858,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                 // Check all harts for breakpoint hits (parallel mode)
                                 // or just the selected one (single mode)
-                                let harts_to_check: Vec<u64> = if use_parallel {
-                                    m.get_all_harts().iter().map(|(_, h)| h.id).collect()
-                                } else {
-                                    vec![hart_id]
+                                let harts_to_check: Vec<u64> = match use_parallel {
+                                    true => m.get_all_harts().iter().map(|(_, h)| h.id).collect(),
+                                    false => vec![hart_id],
                                 };
 
                                 let mut this_round_hit_bp = false;
@@ -879,7 +894,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                         h.x.read(13));
                                                 }
                                                 this_round_hit_bp = true;
-                                                // Do NOT break — collect ALL harts' breakpoint hits
+                                                // Do NOT break 鈥� collect ALL harts' breakpoint hits
                                             }
                                         }
                                     }
@@ -893,8 +908,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 // P1-24: step_hart_internal already marks a hart as
                                 // Finished when PC goes past the end of inst_cache.
                                 // This check covers both single-hart and multi-hart
-                                // modes — the old has_inst_at_pc guard was redundant
-                                // in single-hart mode (Finished ⟺ ¬has_inst_at_pc).
+                                // modes 鈥� the old has_inst_at_pc guard was redundant
+                                // in single-hart mode (Finished 鉄� 卢has_inst_at_pc).
                                 let all_finished = m.get_all_harts()
                                     .iter()
                                     .all(|(_, h)| matches!(h.state, HartState::Finished));
@@ -982,7 +997,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                         .unwrap_or("program.rv.s")
                                                         .to_string();
                                                     frame_id_counter += 1;
-                                                    // Record frame → hart mapping for RestartFrame.
+                                                    // Record frame 鈫� hart mapping for RestartFrame.
                                                     frame_to_hart.insert(frame_id_counter, st_hart_id);
                                                     let sf = types::StackFrame {
                                                         id: frame_id_counter,
@@ -1152,7 +1167,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 }
                                                 Command::SetBreakpoints(bp_args) => {
                                                     // P0-25 + P1-30: Match program by source.path only.
-                                                    // No silent fallback — source.path must be in
+                                                    // No silent fallback 鈥� source.path must be in
                                                     // source_to_program, otherwise return verified: false.
                                                     let bp_program_id = bp_args.source.path.as_ref()
                                                         .map(|p| canonicalize_path(p))
@@ -1180,7 +1195,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                         server.respond(pending_req.success(
                                                             ResponseBody::SetBreakpoints(SetBreakpointsResponse { breakpoints: unverified_bps })
                                                         ))?;
-                                                        // Skip hit check — unverified bps have no line
+                                                        // Skip hit check 鈥� unverified bps have no line
                                                     } else {
                                                         let bp_program_id = bp_program_id.unwrap();
                                                         let bp_table = breakpoints_map.entry(bp_program_id).or_default();
@@ -1214,13 +1229,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     // P0-11: After detecting hits, break the outer execution
                                                     // loop so the instruction at the breakpoint is NOT
                                                     // executed (stop-before-execution semantics).
-                                                    // P0-12: Collect ALL harts' breakpoint hits — do NOT
+                                                    // P0-12: Collect ALL harts' breakpoint hits 鈥� do NOT
                                                     // break from the for loop early.
                                                     if !hit_breakpoint {
-                                                        let check_harts: Vec<u64> = if use_parallel {
-                                                            m.get_all_harts().iter().map(|(_, h)| h.id).collect()
-                                                        } else {
-                                                            vec![hart_id]
+                                                        let check_harts: Vec<u64> = match use_parallel {
+                                                            true => m.get_all_harts().iter().map(|(_, h)| h.id).collect(),
+                                                            false => vec![hart_id],
                                                         };
                                                         let mut setpoint_hit = false;
                                                         for &hid in &check_harts {
@@ -1244,7 +1258,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                                             "continue: new breakpoint hit at line {} (hart {}) after SetBreakpoints",
                                                                             current_line, hid
                                                                         );
-                                                                        // Do NOT break — collect ALL harts' hits (P0-12)
+                                                                        // Do NOT break 鈥� collect ALL harts' hits (P0-12)
                                                                     }
                                                                 }
                                                             }
@@ -1263,7 +1277,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                         }
                                         None => {
-                                            // Stream closed — terminate
+                                            // Stream closed 鈥� terminate
                                             should_terminate = true;
                                             break;
                                         }
@@ -1313,7 +1327,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                         // Post-loop event handling (DAP async: Continue was
-                        // already responded to above — we only send events here).
+                        // already responded to above 鈥� we only send events here).
                         if should_terminate {
                             // P0-4: Non-zero exit code on execution error so
                             // automation/scripts can distinguish crash from normal exit.
@@ -1328,12 +1342,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             } else {
                                 types::StoppedEventReason::Pause
                             };
-                            let desc = if hit_breakpoint {
-                                format!("breakpoint hit at line {}", current_line)
-                            } else {
-                                "paused (step limit reached)".into()
+                            let desc = match hit_breakpoint {
+                                true => format!("breakpoint hit at line {}", current_line),
+                                false => "paused (step limit reached)".to_string(),
                             };
-                            let hit_ids: Vec<i64> = if hit_breakpoint { hit_bp_ids } else { vec![] };
+                            let hit_ids: Vec<i64> = if hit_breakpoint { hit_bp_ids } else { Vec::new() };
                             server.send_event(Event::Stopped(StoppedEventBody {
                                 reason: stop_reason,
                                 description: Some(desc),
@@ -1347,10 +1360,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 hit_breakpoint_ids: Some(hit_ids),
                             }))?;
                         }
-                        // If paused_by_user: StoppedEvent already sent inline — skip.
+                        // If paused_by_user: StoppedEvent already sent inline 鈥� skip.
                     } // else (DAP async execution path)
                 } else {
-                    // No machine loaded — just acknowledge
+                    // No machine loaded 鈥� just acknowledge
                     server.respond(req.success(ResponseBody::Continue(
                         ContinueResponse { all_threads_continued: None }
                     )))?;
@@ -1558,7 +1571,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 } else if vr_base == MACHINE_BASE {
-                    // Return machine-wide stats — all data comes from simulator APIs
+                    // Return machine-wide stats 鈥� all data comes from simulator APIs
                     if let Some(ref m) = machine {
                         let total = m.get_total_cycles();
                         let count = m.hart_count() as u64;
@@ -1658,7 +1671,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         // P0-3: x0 is hardwired to 0 per RISC-V ISA.
                                         // Writing to it is silently ignored by IntegerRegisterFile,
                                         // but the DAP layer previously reported success with the
-                                        // user-supplied value — making the UI show false data.
+                                        // user-supplied value 鈥� making the UI show false data.
                                         // Explicitly reject the write so the user gets honest feedback.
                                         if idx == 0 {
                                             server.respond(req.error(
@@ -1708,7 +1721,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         if let Some(ref mut m) = machine {
                                             if let Some(hart) = m.get_hart_mut(setvar_hart_id) {
                                                 // Route through write_register for
-                                                // consistency — avoids the dual-path
+                                                // consistency 鈥� avoids the dual-path
                                                 // issue where DAP bypasses write_register.
                                                 // P1-20: Propagate write errors instead
                                                 // of silently swallowing them with let _.
@@ -1739,7 +1752,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                 } else {
-                    // PERF_BASE, MACHINE_BASE, or any other scope —
+                    // PERF_BASE, MACHINE_BASE, or any other scope 鈥�
                     // SetVariable is only supported for register scopes.
                     let err_ref = args.variables_reference;
                     server.respond(req.error(&format!(
@@ -1897,7 +1910,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Must match source.path exactly against the source_to_program
                 // map built during Launch.  Any fallback (selected_hart_id or
                 // default 0) would silently route breakpoints to the wrong
-                // program — instead, return verified: false so VSCode shows
+                // program 鈥� instead, return verified: false so VSCode shows
                 // the hollow-grey-circle indicator and logs the error reason.
                 let program_id = args
                     .source
@@ -1908,7 +1921,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .copied();
 
                 if program_id.is_none() {
-                    // Source file not registered — not in any loaded program.
+                    // Source file not registered 鈥� not in any loaded program.
                     // Return all breakpoints as unverified so the user can see
                     // they didn't take effect and knows why.
                     let msg = args
@@ -2034,7 +2047,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // VSCode correctly transitions to stopped state and
                             // refreshes StackTrace/Scopes.  All other state-
                             // changing operations (Goto, StepIn, Next, Continue)
-                            // follow this pattern — RestartFrame was the only
+                            // follow this pattern 鈥� RestartFrame was the only
                             // one that didn't.
                             server.send_event(Event::Stopped(StoppedEventBody {
                                 reason: types::StoppedEventReason::Pause,
@@ -2099,13 +2112,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 server.respond(req.success(ResponseBody::ConfigurationDone))?;
 
-                // Do NOT auto-set breakpoints on all lines — that would make
+                // Do NOT auto-set breakpoints on all lines 鈥� that would make
                 // Continue behave like single-step (it would stop at every
                 // source line). The initial StoppedEvent at the entry point
                 // already gives the user a starting state; breakpoints are
                 // user-controlled.
 
-                // Respond to ConfigurationDone BEFORE sending StoppedEvent — stream ordering
+                // Respond to ConfigurationDone BEFORE sending StoppedEvent 鈥� stream ordering
                 // guarantees VSCode processes the response first, then the event.
                 // P0-12: Use selected_hart_id to derive the thread_id instead of
                 // hardcoding 1.  In multi-hart scenarios the default hart may not
@@ -2153,7 +2166,7 @@ enum StepOutcome {
     Error(String),
 }
 
-/// Find the source line for the nearest mapped offset ≤ `offset`.
+/// Find the source line for the nearest mapped offset 鈮� `offset`.
 /// This is used when the PC lands at an address without direct debug info
 /// (e.g. jump targets inside macro expansions). Returns the most recently
 /// preceding source line so the UI doesn't show a stale/incorrect position.
@@ -2173,7 +2186,7 @@ fn find_nearest_line(
 }
 
 /// Execute one instruction on given hart and update current_line.
-/// Shared by StepIn and Next — both do the same thing for RISC-V assembly.
+/// Shared by StepIn and Next 鈥� both do the same thing for RISC-V assembly.
 fn do_single_step(
     machine: &mut Option<Machine>,
     hart_id: u64,
@@ -2229,7 +2242,7 @@ fn do_single_step(
     StepOutcome::Terminated
 }
 
-/// Load and assemble a .rv.s file into a Machine and build per-program offset→line mapping
+/// Load and assemble a .rv.s file into a Machine and build per-program offset鈫抣ine mapping
 /// Normalize a file path for consistent HashMap lookups across DAP requests.
 /// Uses std::fs::canonicalize which resolves symlinks, "..", "." segments
 /// and normalizes the path to the OS-native form.  On Windows this also
@@ -2270,7 +2283,7 @@ fn load_and_assemble(
     machine.load_program_to_processor(program_id, 0, true)
         .map_err(|e| format!("failed to load program into processor 0: {:?}", e))?;
 
-    // Build offset → source line number mapping from instruction positions.
+    // Build offset 鈫� source line number mapping from instruction positions.
     // P0-18: Pseudo-instructions (e.g. `la`) expand to multiple machine-code
     // words.  We must map EVERY intermediate offset to the source line, not just
     // the first one.  Otherwise breakpoint detection in the Continue loop fails
@@ -2285,16 +2298,24 @@ fn load_and_assemble(
             if let Some(range) = inst.get_name_location() {
                 // SourceRange uses 1-based line numbers
                 let line = range.start.line as usize;
-                let base_offset = item.get_offset();
+                let mut offset = item.get_offset();
                 let machine_codes = prog
                     .get_machine_code_list(item, &machine.registers, &labels)
                     .unwrap_or_default();
-                let count = machine_codes.len().max(1);
-                for i in 0..count {
-                    let offset = base_offset + i * PC_INCREMENT;
+                if machine_codes.is_empty() {
                     offset_to_line.insert(offset, line);
                     line_to_offs.entry(line).or_default().push(offset);
                     log::info!("  offset {} -> source line {}", offset, line);
+                } else {
+                    for mc in &machine_codes {
+                        let bytes = mc.get_code_data().to_vec();
+                        if !bytes.is_empty() {
+                            offset_to_line.insert(offset, line);
+                            line_to_offs.entry(line).or_default().push(offset);
+                            log::info!("  offset {} -> source line {}", offset, line);
+                            offset += bytes.len();
+                        }
+                    }
                 }
             }
         }
@@ -2308,11 +2329,11 @@ fn load_and_assemble(
     offset_to_line_map.insert(program_id, offset_to_line);
     line_to_offsets.insert(program_id, line_to_offs);
 
-    // Build source path → program_id mapping so SetBreakpoints/GotoTargets
+    // Build source path 鈫� program_id mapping so SetBreakpoints/GotoTargets
     // can match DAP source.path to the correct program.
     // P0-27: Canonicalize the path so subsequent DAP requests (which may send
     // slightly different path representations due to VSCode's internal
-    // path normalization) always match — otherwise SetBreakpoints,
+    // path normalization) always match 鈥� otherwise SetBreakpoints,
     // GotoTargets, and BreakpointLocations all fail simultaneously.
     let canonical_path = canonicalize_path(file_path);
     source_to_program.insert(canonical_path, program_id);
