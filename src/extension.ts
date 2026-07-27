@@ -82,6 +82,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   outputChannel = vscode.window.createOutputChannel("RISC-V Debugger");
   outputChannel.appendLine("Debugger extension activated");
 
+  // ✅ Register the debug adapter descriptor factory FIRST so that debugging
+  // works even if the LSP server is missing or fails to start.
+  context.subscriptions.push(
+    vscode.debug.registerDebugAdapterDescriptorFactory(
+      "riscv",
+      new RiscvDebugAdapterFactory(context, outputChannel)
+    )
+  );
+
   const serverPath = path.join(
     context.extensionPath,
     "server",
@@ -124,13 +133,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
 
   console.log("RISC-V extension starting...");
-
-  context.subscriptions.push(
-    vscode.debug.registerDebugAdapterDescriptorFactory(
-      "riscv",
-      new RiscvDebugAdapterFactory(context, outputChannel)
-    )
-  );
 
   try {
     await client.start();

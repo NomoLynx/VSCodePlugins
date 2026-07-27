@@ -118,10 +118,12 @@ main:
 
     let mut machine = Machine::default();
     let program = parse_asm_use_default_config(&asm_prog_text).unwrap();
-    machine.add_program(program);
+    let prog_id = machine.add_program(program).unwrap();
+    // load program into processor 0's local memory so data sections are accessible
+    machine.load_program_to_processor(0, prog_id, true).unwrap();
 
-    assert_eq!(machine.memory.read_u32(0).unwrap(), 0);
-    assert_eq!(machine.memory.read_u32(4).unwrap(), 1);
+    assert_eq!(machine.processors[0].memory.read_u32(0).unwrap(), 0);
+    assert_eq!(machine.processors[0].memory.read_u32(4).unwrap(), 1);
 }
 
 #[test]
