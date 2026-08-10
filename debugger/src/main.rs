@@ -5,17 +5,12 @@ mod trace;
 mod debug;
 mod debugger_error;
 
-use core_utils::filesystem::*;
-use core_utils::debug::*;
-use core_utils::log::init_logger;
 use riscv_asm_lib::r5asm::assembler::*;
 
 use crate::machine::machine::Machine;
 use crate::machine::hart::HartState;
 use crate::machine::register_ref::{RegisterRef, RegisterType};
 use crate::machine::runtime_value::RuntimeValue;
-
-use log::{info, warn, error};
 
 use log::LevelFilter;
 use log4rs::{
@@ -26,7 +21,6 @@ use log4rs::{
 
 use dap::prelude::*;
 use dap::events::*;
-use dap::requests::*;
 use dap::responses::*;
 use dap::types;
 
@@ -93,6 +87,17 @@ fn stdin_has_data() -> bool {
     };
 
     unsafe { poll(&mut pfd, 1, 0) > 0 }
+}
+
+fn get_lines_from_args(args: &requests::SetBreakpointsArguments) -> Vec<i64> {
+    let lines: Vec<i64> = args.breakpoints
+                            .as_deref()
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|bp| bp.line)
+                            .collect();
+
+    lines
 }
 
 /// Variables reference base for register scopes.
@@ -1904,7 +1909,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 log::info!("setBreakpoints: source.path={:?}, source.name={:?}", 
                     args.source.path, args.source.name);
                 log::info!("setBreakpoints: breakpoints={:?}", args.breakpoints);
-                log::info!("setBreakpoints: lines={:?}", args.lines);
+                log::info!("setBreakpoints: lines={:?}", get_lines_from_args(args));
 
                 // Determine which program these breakpoints belong to.
                 // Must match source.path exactly against the source_to_program
@@ -1934,7 +1939,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     let bp_count = args.breakpoints.as_ref()
                         .map(|b| b.len())
-                        .or_else(|| args.lines.as_ref().map(|l| l.len()))
                         .unwrap_or(0);
                     let unverified_bps: Vec<types::Breakpoint> = (0..bp_count)
                         .map(|_| types::Breakpoint {
@@ -1984,7 +1988,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 offset: None,
                             });
                         }
-                    } else if let Some(ref lines) = args.lines {
+                    } else {
+                        let ref lines = get_lines_from_args(args);
+
                         // Handle deprecated lines field
                         for line in lines {
                             // P0-16: Use global unique bp_id

@@ -172,7 +172,9 @@
     "build-server": "cargo build --manifest-path ./server/Cargo.toml",
     "build-server-release": "cargo build --release --manifest-path ./server/Cargo.toml",
     "build-debugger": "cargo build --manifest-path ./debugger/Cargo.toml",
-    "build-debugger-release": "cargo build --release --manifest-path ./debugger/Cargo.toml"
+    "build-debugger-release": "cargo build --release --manifest-path ./debugger/Cargo.toml",
+    "build-all-release": "npm run build-server-release && npm run build-debugger-release && npm run compile",
+    "build-all": "npm run build-server && npm run build-debugger && npm run compile"
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"
