@@ -83,3 +83,4 @@ This generates a VSIX package in the project folder.
 - The extension currently uses the parser's source locations to place semantic tokens precisely.
 - The server binary used by the extension is the release build under the server target folder.
 - Colors can be tuned later without changing the parser logic.
+- When first set up the dev environment, add the content in launch.json to the Extension Debug instance. And select "Debug RISC-V ASM".
