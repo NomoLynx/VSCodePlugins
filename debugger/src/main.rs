@@ -2297,7 +2297,7 @@ fn load_and_assemble(
     let mut offset_to_line: HashMap<usize, usize> = HashMap::new();
     let mut line_to_offs: HashMap<usize, Vec<usize>> = HashMap::new();
     let prog = &machine.programs[program_id];
-    let labels = prog.get_labels();
+    let labels = prog.get_labels().unwrap();
     for item in prog.get_text_section_items() {
         if let Some(inst) = item.get_inc() {
             // Try to get the source line from the instruction's name location

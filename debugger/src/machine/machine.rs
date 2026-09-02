@@ -239,7 +239,7 @@ impl Machine {
         // intermediate offsets within a pseudo-instruction expansion would
         // cause fetch_inst to return None, and the hart would be marked
         // Finished prematurely.
-        let labels = program.get_labels();
+        let labels = program.get_labels().unwrap();
         for (idx, item) in program.get_text_section_items().iter().enumerate() {
             if item.get_inc().is_none() {
                 continue;
@@ -348,7 +348,7 @@ impl Machine {
         // Load text section instruction machine code into memory.
         // Without this, code-region memory reads (PC-relative constant pools,
         // self-modifying code, debugger code segment inspection) return garbage.
-        let labels = program.get_labels();
+        let labels = program.get_labels().unwrap();
         for item in program.get_text_section_items() {
             let Some(_) = item.get_inc() else {
                 continue;
