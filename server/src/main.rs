@@ -1,8 +1,9 @@
 pub(crate) mod asm_parser;
 pub(crate) mod lsp_location;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use tokio::sync::RwLock;
 use tower_lsp::jsonrpc::Result;
@@ -36,7 +37,11 @@ const TOKEN_LEGEND_REGISTER_VECTOR: &str = "registerVector";
 const TOKEN_LEGEND_IMMEDIATE: &str = "immediate";
 const TOKEN_LEGEND_SECTION_TAG: &str = "sectionTag";
 
-static TOKEN_TEXT_DEBUG_MESSAGES: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+thread_local! {
+    /// Collects debug messages emitted while extracting token text.
+    /// Flushed to the LSP client after each `semantic_tokens_full` request.
+    static TOKEN_TEXT_DEBUG_MESSAGES: RefCell<Vec<String>> = RefCell::new(Vec::new());
+}
 
 #[derive(Debug)]
 enum ParseState {
@@ -157,22 +162,12 @@ fn collect_parse_diagnostics(text: &str) -> Vec<Diagnostic> {
     DocumentState::from_text(text.to_string()).diagnostics()
 }
 
-fn token_text_debug_messages() -> &'static Mutex<Vec<String>> {
-    TOKEN_TEXT_DEBUG_MESSAGES.get_or_init(|| Mutex::new(Vec::new()))
-}
-
 fn push_token_text_debug_message(message: String) {
-    if let Ok(mut messages) = token_text_debug_messages().lock() {
-        messages.push(message);
-    }
+    TOKEN_TEXT_DEBUG_MESSAGES.with(|messages| messages.borrow_mut().push(message));
 }
 
 fn take_token_text_debug_messages() -> Vec<String> {
-    if let Ok(mut messages) = token_text_debug_messages().lock() {
-        std::mem::take(&mut *messages)
-    } else {
-        Vec::new()
-    }
+    TOKEN_TEXT_DEBUG_MESSAGES.with(|messages| std::mem::take(&mut *messages.borrow_mut()))
 }
 
 fn collect_semantic_tokens(text: &str, program: &AsmProgram) -> Vec<SemanticToken> {

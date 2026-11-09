@@ -41,7 +41,7 @@ class RiscvDebugAdapterFactory
       "debugger",
       "target",
       "release",
-      "riscv_debug_adapter.exe"
+      debuggerBinaryName()
     );
 
     this.output.appendLine("Launching debugger:");
@@ -137,13 +137,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   try {
     await client.start();
     vscode.window.showInformationMessage("✅ RiscV LSP started");
+    context.subscriptions.push(client);
   } catch (err) {
     vscode.window.showErrorMessage("❌ Failed to start RiscV LSP: " + err);
     console.error(err);
   }
-
-  // ✅ IMPORTANT
-  context.subscriptions.push(client);
 }
 
 export async function deactivate(): Promise<void> {

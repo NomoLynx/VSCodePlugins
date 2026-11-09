@@ -1,40 +1,55 @@
+//! A processor: a hart container plus processor-local memory and a clock.
+
 use super::hart::Hart;
 use crate::memory::memory::Memory;
 
-pub enum AddressingMode {
+/// The address width of a processor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AddressingMode {
+    /// 32-bit addressing.
     Bit32,
+    /// 64-bit addressing.
     Bit64,
+    /// 128-bit addressing.
     Bit128,
 }
 
 impl AddressingMode {
-    pub fn to_ptr_size(&self) -> u64 {
+    /// Returns the size in bytes of a pointer for this addressing mode.
+    #[must_use]
+    pub fn to_ptr_size(self) -> u64 {
         match self {
-            AddressingMode::Bit32 => 4,
-            AddressingMode::Bit64 => 8,
-            AddressingMode::Bit128 => 16,
+            Self::Bit32 => 4,
+            Self::Bit64 => 8,
+            Self::Bit128 => 16,
         }
     }
 }
 
+/// A logical processor: one or more harts sharing local memory and a clock.
+#[derive(Debug)]
 pub struct Processor {
-    pub harts: Vec<Hart>,
-    pub addressing: AddressingMode,
-    /// Processor-local memory shared by all harts within this processor.
-    pub memory: Memory,
-    /// Processor-local clock — advances in lockstep with all other processors.
-    /// Private: modifications must go through step_all_harts or set_clock.
+    /// The harts belonging to this processor.
+    pub(crate) harts: Vec<Hart>,
+    /// The address width of this processor.
+    pub(crate) addressing: AddressingMode,
+    /// Processor-local memory shared by all harts in this processor.
+    pub(crate) memory: Memory,
+    /// Processor-local clock, advancing in lockstep across all processors.
     clock: u64,
 }
 
 impl Processor {
-    /// Return the current processor clock value (read-only).
+    /// Returns the current processor clock value (read-only).
+    #[must_use]
     pub fn clock(&self) -> u64 {
         self.clock
     }
 
-    /// Set the processor clock directly. Only accessible within the crate
-    /// so that the Machine layer can enforce the global clock invariant.
+    /// Sets the processor clock directly.
+    ///
+    /// Only crate-visible so that the machine layer can enforce the global
+    /// clock invariant.
     pub(crate) fn set_clock(&mut self, value: u64) {
         self.clock = value;
     }

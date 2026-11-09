@@ -7,12 +7,6 @@ use crate::utility::*;
 mod machine;
 #[path = "../src/memory/mod.rs"]
 mod memory;
-#[path = "../src/vm/mod.rs"]
-mod vm;
-#[path = "../src/trace/mod.rs"]
-mod trace;
-#[path = "../src/debug/mod.rs"]
-mod debug;
 #[path = "../src/debugger_error.rs"]
 mod debugger_error;
 
@@ -937,10 +931,10 @@ main:
     let base = 0x1000u64;
     set_reg(&mut m, "t0", base);
     // Write 4 u32 values to memory
-    m.memory.write_u32(base, 100);
-    m.memory.write_u32(base + 4, 200);
-    m.memory.write_u32(base + 8, 300);
-    m.memory.write_u32(base + 12, 400);
+    m.processors[0].memory.write_u32(base, 100);
+    m.processors[0].memory.write_u32(base + 4, 200);
+    m.processors[0].memory.write_u32(base + 8, 300);
+    m.processors[0].memory.write_u32(base + 12, 400);
     step(&mut m);
     let v1 = get_vreg(&m, "v1");
     assert_eq!(get_velem(&v1, 0, 4), 100);
@@ -960,8 +954,8 @@ main:
     setup_vsetvli(&mut m, "e64", "m1", 2);
     let base = 0x1000u64;
     set_reg(&mut m, "t0", base);
-    m.memory.write_u64(base, 0xDEADBEEF);
-    m.memory.write_u64(base + 8, 0xCAFEBABE);
+    m.processors[0].memory.write_u64(base, 0xDEADBEEF);
+    m.processors[0].memory.write_u64(base + 8, 0xCAFEBABE);
     step(&mut m);
     let v1 = get_vreg(&m, "v1");
     assert_eq!(get_velem(&v1, 0, 8), 0xDEADBEEF);
@@ -980,7 +974,7 @@ main:
     let base = 0x1000u64;
     set_reg(&mut m, "t0", base);
     for i in 0..8 {
-        m.memory.write_u8(base + i as u64, (i * 10 + 1) as u8);
+        m.processors[0].memory.write_u8(base + i as u64, (i * 10 + 1) as u8);
     }
     step(&mut m);
     let v1 = get_vreg(&m, "v1");
@@ -1013,10 +1007,10 @@ main:
     set_vreg(&mut m, "v1", v1);
     step(&mut m);
     // Verify memory was written
-    assert_eq!(m.memory.read_u32(base).unwrap_or_default(), 111);
-    assert_eq!(m.memory.read_u32(base + 4).unwrap_or_default(), 222);
-    assert_eq!(m.memory.read_u32(base + 8).unwrap_or_default(), 333);
-    assert_eq!(m.memory.read_u32(base + 12).unwrap_or_default(), 444);
+    assert_eq!(m.processors[0].memory.read_u32(base).unwrap_or_default(), 111);
+    assert_eq!(m.processors[0].memory.read_u32(base + 4).unwrap_or_default(), 222);
+    assert_eq!(m.processors[0].memory.read_u32(base + 8).unwrap_or_default(), 333);
+    assert_eq!(m.processors[0].memory.read_u32(base + 12).unwrap_or_default(), 444);
 }
 
 #[test]
@@ -1035,8 +1029,8 @@ main:
     set_velem(&mut v1, 1, 8, 0x1111222233334444);
     set_vreg(&mut m, "v1", v1);
     step(&mut m);
-    assert_eq!(m.memory.read_u64(base).unwrap_or_default(), 0xAAAABBBBCCCCDDDD);
-    assert_eq!(m.memory.read_u64(base + 8).unwrap_or_default(), 0x1111222233334444);
+    assert_eq!(m.processors[0].memory.read_u64(base).unwrap_or_default(), 0xAAAABBBBCCCCDDDD);
+    assert_eq!(m.processors[0].memory.read_u64(base + 8).unwrap_or_default(), 0x1111222233334444);
 }
 
 // ============================================================
