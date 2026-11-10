@@ -190,14 +190,19 @@ pub type ProcessorId = usize;
 pub type HartId = u64;
 pub type ProgramId = usize;
 
+/// The simulated machine: processors, programs, registers, and memory.
+///
+/// `Machine` is the top-level owner of the simulated system and the primary
+/// entry point for the debugger front-end.
 pub struct Machine {
+    /// The processors in this machine, each hosting one or more harts.
     pub processors: Vec<Processor>,
 
+    /// Programs registered with this machine (not necessarily loaded).
     pub programs: Vec<AsmProgram>,
 
+    /// The global register naming/lookup table.
     pub registers: Register,
-
-    pub memory: Memory,
 
     /// O(1) cache: (program_id, pc_offset) → (index in text_section_items, machine_code_count)
     /// machine_code_count is the number of machine-code words the assembler produced for
@@ -213,12 +218,13 @@ pub struct Machine {
 
 impl Machine {
 
+    /// Creates an empty machine with a single default processor.
+    #[must_use]
     pub fn new() -> Self {
         let mut r = Self {
             processors: vec![],
             programs: vec![],
             registers: Register::new(),
-            memory: Memory::new(),
             inst_cache: HashMap::new(),
             next_hart_id: 0,       // hart 0 is created by default processor
         };
@@ -227,8 +233,16 @@ impl Machine {
         r
     }
 
-    /// Register a program (parse, cache instructions) without loading it into any processor memory.
-    /// Use `load_program_to_processor` to load the program into one or more processors.
+    /// Register a program (parse, cache instructions) without loading it into
+    /// any processor memory.
+    ///
+    /// Use [`Machine::load_program_to_processor`] to load the program into one
+    /// or more processors.  Returns the allocated [`ProgramId`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DebuggerError`] if instruction encoding fails during cache
+    /// construction.
     pub fn add_program(&mut self, program: AsmProgram) -> Result<ProgramId, DebuggerError> {
         let id = self.programs.len();
 
@@ -239,7 +253,7 @@ impl Machine {
         // intermediate offsets within a pseudo-instruction expansion would
         // cause fetch_inst to return None, and the hart would be marked
         // Finished prematurely.
-        let labels = program.get_labels().unwrap();
+        let labels = program.get_labels();
         for (idx, item) in program.get_text_section_items().iter().enumerate() {
             if item.get_inc().is_none() {
                 continue;
@@ -348,7 +362,7 @@ impl Machine {
         // Load text section instruction machine code into memory.
         // Without this, code-region memory reads (PC-relative constant pools,
         // self-modifying code, debugger code segment inspection) return garbage.
-        let labels = program.get_labels().unwrap();
+        let labels = program.get_labels();
         for item in program.get_text_section_items() {
             let Some(_) = item.get_inc() else {
                 continue;
@@ -371,8 +385,10 @@ impl Machine {
     }
 
     /// Add a processor, reassigning globally unique Hart IDs to every Hart
-    /// inside it to prevent ID collisions across processors, and assigning a
-    /// globally unique Processor ID.
+    /// inside it to prevent ID collisions across processors.
+    /// Processors are identified by their index in `Machine::processors`
+    /// (there is no separate processor ID field), so `get_processor_index`
+    /// and the `processor_id` in `HartPerformance` are that index.
     /// The new processor's clock is synchronised to the current global level
     /// so the "all processors share the same clock" invariant is maintained.
     pub fn add_processor(&mut self, mut processor: Processor) {
@@ -481,11 +497,12 @@ impl Machine {
     pub fn get_hart_performance(&self, hart_id: HartId) -> Option<HartPerformance> {
         let hart = self.get_hart(hart_id)?;
         let processor_id = self.get_processor_index(hart_id).unwrap_or(0);
-        let proc_clock = self.processors[processor_id].clock();
-        // Freeze runtime_cycles at finish time for Finished harts,
-        // preventing it from growing indefinitely after termination.
-        let clock_limit = hart.finish_clock.map_or(proc_clock, |fc| fc.min(proc_clock));
-        let runtime_cycles = clock_limit.saturating_sub(hart.start_clock);
+        // Stop-the-world model: `elapsed_cycles` advances only while this hart
+        // actually takes part in a step, so it doubles as the frozen runtime
+        // counter — a Finished hart stops executing and therefore stops
+        // accumulating. `finish_clock` is kept as metadata (when it ended) and
+        // is no longer needed to clamp the runtime.
+        let runtime_cycles = hart.elapsed_cycles.saturating_sub(hart.start_clock);
         Some(HartPerformance {
             hart_id: hart.id,
             processor_id,
@@ -502,9 +519,8 @@ impl Machine {
         let mut result = Vec::new();
         for (pid, processor) in self.processors.iter().enumerate() {
             for hart in &processor.harts {
-                let proc_clock = processor.clock();
-                let clock_limit = hart.finish_clock.map_or(proc_clock, |fc| fc.min(proc_clock));
-                let runtime_cycles = clock_limit.saturating_sub(hart.start_clock);
+                // Stop-the-world model: see `get_hart_performance`.
+                let runtime_cycles = hart.elapsed_cycles.saturating_sub(hart.start_clock);
                 result.push(HartPerformance {
                     hart_id: hart.id,
                     processor_id: pid,
@@ -521,10 +537,13 @@ impl Machine {
 
     /// Return the clock value of processor 0 (backward-compatible convenience).
     ///
-    /// NOTE: This is NOT a "global" clock. In multi-processor systems each
-    /// processor has an independent clock. The name is retained for backward
-    /// compatibility. Use `get_processor_clock` to get a specific processor's
-    /// clock, and `get_all_performances` for per-hart/per-processor statistics.
+    /// All processors share one lockstep clock: `step_hart` and
+    /// `step_all_harts` advance every processor's clock by the same amount
+    /// (see the clock-advance loops in those methods), so this value is the
+    /// machine-wide clock and is identical to every `get_processor_clock`.
+    /// Use `get_processor_clock` to read a specific processor's clock, and
+    /// `get_all_performances` for per-hart statistics. The historical name is
+    /// retained for backward compatibility.
     pub fn get_global_clock(&self) -> u64 {
         self.processors.first().map(|p| p.clock()).unwrap_or(0)
     }
@@ -644,14 +663,10 @@ impl Machine {
                 any_stepped = true;
                 global_max_cycles = global_max_cycles.max(proc_max);
                 total_stepped += proc_stepped;
-            } else if proc_error.is_some() {
+            } else if let Some(ref err) = proc_error {
                 // All harts in this processor failed — still count 1 fetch cycle
                 global_max_cycles = global_max_cycles.max(1);
-                errors.push(format!(
-                    "processor {}: {:?}",
-                    proc_idx,
-                    proc_error.unwrap()
-                ));
+                errors.push(format!("processor {proc_idx}: {err:?}"));
             }
         }
 
@@ -664,10 +679,19 @@ impl Machine {
                     .wrapping_add(global_max_cycles);
                 self.processors[proc_idx].set_clock(new_clock);
 
-                // All harts in this processor age by the global cycle count
+                // Stop-the-world model: only harts that actually took part in
+                // this round age by the global cycle count.  A hart that was
+                // already Finished before Pass 1 did not execute and must stay
+                // frozen.  "Took part" = still running now, or finished during
+                // this very round (tracked explicitly, see per_proc_finished_this_round).
+                let finished_this_round = &per_proc_finished_this_round[proc_idx];
                 for hart in &mut self.processors[proc_idx].harts {
-                    hart.elapsed_cycles =
-                        hart.elapsed_cycles.wrapping_add(global_max_cycles);
+                    let took_part = !matches!(hart.state, HartState::Finished)
+                        || finished_this_round.contains(&hart.id);
+                    if took_part {
+                        hart.elapsed_cycles =
+                            hart.elapsed_cycles.wrapping_add(global_max_cycles);
+                    }
                 }
 
                 // Successfully-executing harts also get their individual exec_cycles
@@ -702,7 +726,7 @@ impl Machine {
             Ok(total_stepped)
         } else if !errors.is_empty() {
             let msg = if errors.len() == 1 {
-                errors.into_iter().next().unwrap()
+                errors.pop().unwrap_or_default()
             } else {
                 errors.join("; ")
             };
@@ -860,10 +884,22 @@ impl Machine {
     }
 
     /// Step a hart forward by one instruction (debug mode).
+    ///
     /// Advances ALL processors' clocks to maintain the "all processors share
-    /// the same clock" invariant.  Corrects finish_clock ONLY for harts that
-    /// just transitioned to Finished during THIS step (same precision as
-    /// step_all_harts Pass 2).
+    /// the same clock" invariant, but follows the **stop-the-world** model for
+    /// per-hart counters: only the stepped hart's `elapsed_cycles` /
+    /// `exec_cycles` advance.  The other harts did not execute, so they stay
+    /// frozen — their Elapsed/Runtime values do not drift while you single-step
+    /// a different hart.  (By contrast, [`Machine::step_all_harts`] runs every
+    /// non-Finished hart and ages all of them.)
+    ///
+    /// Corrects `finish_clock` ONLY for harts that just transitioned to
+    /// `Finished` during THIS step (same precision as [`Machine::step_all_harts`]
+    /// Pass 2).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DebuggerError`] if instruction fetch or execution fails.
     pub fn step_hart(&mut self, hart_id: HartId) -> Result<(), DebuggerError> {
         // Silently skip already-finished harts — consistent with step_all_harts
         // which also silently skips Finished harts.  Callers should check
@@ -890,14 +926,15 @@ impl Machine {
                 // The previous code only advanced the current hart's processor,
                 // creating a permanent clock skew between processors after the
                 // first single-step.
+                //
+                // Stop-the-world model: per-hart `elapsed_cycles` is deliberately
+                // NOT advanced here. Only the hart being stepped took part, so the
+                // other harts stay frozen (see the update below).
                 for proc in &mut self.processors {
                     let new_clock = proc.clock().wrapping_add(cycles);
                     proc.set_clock(new_clock);
-                    for hart in &mut proc.harts {
-                        hart.elapsed_cycles = hart.elapsed_cycles.wrapping_add(cycles);
-                    }
                 }
-                // Update the stepped hart's exec_cycles
+                // Update the stepped hart's exec_cycles and elapsed_cycles.
                 if let Some(pi) = proc_idx {
                     if let Some(hart) = self.processors[pi]
                         .harts
@@ -905,6 +942,7 @@ impl Machine {
                         .find(|h| h.id == hart_id)
                     {
                         hart.exec_cycles = hart.exec_cycles.wrapping_add(cycles);
+                        hart.elapsed_cycles = hart.elapsed_cycles.wrapping_add(cycles);
                         hart.csr.mcycle = hart.csr.mcycle.wrapping_add(cycles);
                     }
                 }
@@ -932,12 +970,11 @@ impl Machine {
             Err(e) => {
                 // Even on failure, fetch/decode consumed at least 1 cycle.
                 // Advance ALL processors to maintain clock invariant.
+                // Stop-the-world model: only the stepped hart's elapsed_cycles
+                // advances — the other harts stay frozen.
                 for proc in &mut self.processors {
                     let new_clock = proc.clock().wrapping_add(1);
                     proc.set_clock(new_clock);
-                    for hart in &mut proc.harts {
-                        hart.elapsed_cycles = hart.elapsed_cycles.wrapping_add(1);
-                    }
                 }
                 if let Some(pi) = proc_idx {
                     if let Some(hart) = self.processors[pi]
@@ -946,6 +983,7 @@ impl Machine {
                         .find(|h| h.id == hart_id)
                     {
                         hart.exec_cycles = hart.exec_cycles.wrapping_add(1);
+                        hart.elapsed_cycles = hart.elapsed_cycles.wrapping_add(1);
                         hart.csr.mcycle = hart.csr.mcycle.wrapping_add(1);
                     }
                 }
@@ -969,8 +1007,10 @@ impl Machine {
     }
 
     /// Mark a hart as Finished and record the processor clock at finish time.
-    /// This freezes runtime_cycles at the actual execution duration, preventing
-    /// it from growing indefinitely after program termination.
+    /// `finish_clock` is kept as metadata (when execution ended).  Runtime
+    /// freezing is inherent to the stop-the-world model: a Finished hart no
+    /// longer executes, so `elapsed_cycles` — and therefore `runtime_cycles =
+    /// elapsed_cycles - start_clock` — stops growing on its own.
     fn finish_hart(&mut self, hart_id: HartId, error_info: Option<String>) {
         let finish_clock = self
             .get_processor_index(hart_id)
@@ -1140,8 +1180,18 @@ impl Machine {
         let idx = self.resolve_reg_index(reg)?;
         let hart = self.get_hart(hart_id)
             .ok_or_else(|| DebuggerError::HartNotFound { hart_id })?;
-        // Read raw u64 bits, interpret lower 32 bits as f32 (RISC-V single-precision)
-        Ok(f32::from_bits(hart.f.read(idx) as u32))
+        let bits = hart.f.read(idx);
+        // Accept both encodings and mirror Hart::read_register's rule:
+        //   * NaN-boxed f32 (upper 32 bits all ones) — the RISC-V
+        //     single-precision encoding written by set_f32 / flw / fadd.s.
+        //   * A plain f64 written directly by a debugger/test helper via
+        //     set_freg.  Narrow it to f32 here so single-precision ops read
+        //     the same value the helper intended.
+        if (bits >> 32) == 0xFFFFFFFF {
+            Ok(f32::from_bits(bits as u32))
+        } else {
+            Ok(f64::from_bits(bits) as f32)
+        }
     }
 
     fn set_f32(&mut self, hart_id: HartId, reg: Option<&String>, value: f32) -> Result<(), DebuggerError> {
@@ -1211,7 +1261,11 @@ impl Machine {
 
     fn get_resolved_i64(&self, hart_id: HartId, inst: &Instruction) -> Result<i64, DebuggerError> {
         if inst.get_rel_fun().is_some() {
-            Ok(inst.get_virtual_address() as u64 as i64)
+            // `get_virtual_address()` returns a `u32` holding a *signed* PC-relative
+            // offset in two's-complement form (e.g. `-96` as `0xFFFF_FFA0`).
+            // Sign-extend via `i32` first: `as u64 as i64` would zero-extend and
+            // turn `-96` into `4294967200`, producing an out-of-range address.
+            Ok(inst.get_virtual_address() as i32 as i64)
         } else {
             self.get_i64_from_imm(hart_id, inst.get_imm())
         }
@@ -1252,6 +1306,41 @@ impl Machine {
             OpCode::Fadds | OpCode::Fsubs | OpCode::Fmuls | OpCode::Fdivs => 3,
             // Single-precision float compare — 1 cycle
             OpCode::Feqs | OpCode::Flts | OpCode::Fles => 1,
+            // RV64 word arithmetic — 1 cycle (low-32 ops + sign-extend)
+            OpCode::Addiw | OpCode::Addw | OpCode::Subw | OpCode::Sllw | OpCode::Srlw
+            | OpCode::Sraw | OpCode::Slliw | OpCode::Srliw | OpCode::Sraiw => 1,
+            // Zba address calculation — 1 cycle
+            OpCode::Slliuw | OpCode::Adduw | OpCode::Sh1add | OpCode::Sh2add | OpCode::Sh3add
+            | OpCode::Sh1adduw | OpCode::Sh2adduw | OpCode::Sh3adduw => 1,
+            // Zbb / Zbs bit manipulation — 1 cycle
+            OpCode::Andn | OpCode::Orn | OpCode::Xnor | OpCode::Rol | OpCode::Ror | OpCode::Rori
+            | OpCode::Clz | OpCode::Clzw | OpCode::Ctz | OpCode::Ctzw
+            | OpCode::Cpop | OpCode::Cpopw
+            | OpCode::Sextb | OpCode::Sexth | OpCode::Orcb | OpCode::Rev8
+            | OpCode::Bclr | OpCode::Bclri | OpCode::Bset | OpCode::Bseti
+            | OpCode::Bext | OpCode::Bexti | OpCode::Binv | OpCode::Binvi
+            | OpCode::Min | OpCode::Minu | OpCode::Max | OpCode::Maxu => 1,
+            // Zicond — 1 cycle
+            OpCode::Czeroeqz | OpCode::Czeronez => 1,
+            // Zbc carry-less multiply — 1 cycle (combinational XOR network)
+            OpCode::Clmul | OpCode::Clmulh | OpCode::Clmulr => 1,
+            // M extension: word multiply / divide / remainder — 3 cycles
+            // (aligned with Mul; a real divider takes longer, kept simple here)
+            OpCode::Mulw | OpCode::Mulh | OpCode::Mulhu | OpCode::Mulhsu
+            | OpCode::Div | OpCode::Divu | OpCode::Divw | OpCode::Divuw
+            | OpCode::Rem | OpCode::Remu | OpCode::Remw | OpCode::Remuw => 3,
+            // Single-precision float load/store — 2 cycles (aligned with Fld/Fsd)
+            OpCode::Flw | OpCode::Fsw | OpCode::Cflw | OpCode::Cflwsp
+            | OpCode::Cfsw | OpCode::Cfswsp => 2,
+            // Float<->int moves and compact word ops — 1 cycle
+            OpCode::Fmvxw | OpCode::Fmvwx | OpCode::Caddw | OpCode::Csubw => 1,
+            // Float conversions / sign injection / classify — 2 cycles
+            OpCode::Fsgnjd | OpCode::Fclasss | OpCode::Fclassd
+            | OpCode::Fcvtsd | OpCode::Fcvtds
+            | OpCode::Fcvtws | OpCode::Fcvtwus | OpCode::Fcvtwd | OpCode::Fcvtwud
+            | OpCode::Fcvtsw | OpCode::Fcvtswu | OpCode::Fcvtdw | OpCode::Fcvtdwu
+            | OpCode::Fcvtls | OpCode::Fcvtlus | OpCode::Fcvtld | OpCode::Fcvtlud
+            | OpCode::Fcvtsl | OpCode::Fcvtslu | OpCode::Fcvtdl | OpCode::Fcvtdlu => 2,
             // Default: 1 cycle for any unrecognized opcode
             _ => 1,
         }
@@ -1287,67 +1376,100 @@ impl Machine {
     // ============================================================
 
     /// Get vector register index from register name
-    fn vreg(&self, name: &Option<String>) -> usize {
-        self.registers
-            .get_register_value(name.as_ref())
-            .unwrap() as usize
+    /// Resolve a vector register name to its register-file index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DebuggerError::RegisterReadError`] when the register name is unknown.
+    fn vreg(&self, name: &Option<String>) -> Result<usize, DebuggerError> {
+        self.resolve_reg_index(name.as_ref())
     }
 
-    /// Read vector register bytes
-    fn get_vreg_bytes(&self, hart_id: HartId, reg: Option<&String>) -> Vec<u8> {
-        let idx = self.vreg(&reg.cloned());
-        let hart = self.get_hart(hart_id).unwrap();
-        hart.v.regs[idx].bytes.clone()
+    /// Read vector register bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the register name or hart cannot be resolved.
+    fn get_vreg_bytes(&self, hart_id: HartId, reg: Option<&String>) -> Result<Vec<u8>, DebuggerError> {
+        let idx = self.vreg(&reg.cloned())?;
+        let hart = self.get_hart(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?;
+        Ok(hart.v.regs[idx].bytes.clone())
     }
 
-    /// Write vector register bytes
-    fn set_vreg_bytes(&mut self, hart_id: HartId, reg: Option<&String>, bytes: Vec<u8>) {
-        let idx = self.vreg(&reg.cloned());
-        let hart = self.get_hart_mut(hart_id).unwrap();
+    /// Write vector register bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the register name or hart cannot be resolved.
+    fn set_vreg_bytes(&mut self, hart_id: HartId, reg: Option<&String>, bytes: Vec<u8>) -> Result<(), DebuggerError> {
+        let idx = self.vreg(&reg.cloned())?;
+        let hart = self.get_hart_mut(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?;
         if idx != 0 {
             hart.v.regs[idx].bytes = bytes;
         }
+        Ok(())
     }
 
-    /// Read vector register bytes by index (for segment load/store)
-    fn get_vreg_bytes_by_idx(&self, hart_id: HartId, idx: usize) -> Vec<u8> {
-        let hart = self.get_hart(hart_id).unwrap();
+    /// Read vector register bytes by index (for segment load/store).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the hart cannot be resolved.
+    fn get_vreg_bytes_by_idx(&self, hart_id: HartId, idx: usize) -> Result<Vec<u8>, DebuggerError> {
+        let hart = self.get_hart(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?;
         if idx < hart.v.regs.len() {
-            hart.v.regs[idx].bytes.clone()
+            Ok(hart.v.regs[idx].bytes.clone())
         } else {
-            vec![0u8; 64]
+            Ok(vec![0u8; 64])
         }
     }
 
-    /// Write vector register bytes by index (for segment load/store)
-    fn set_vreg_bytes_by_idx(&mut self, hart_id: HartId, idx: usize, bytes: Vec<u8>) {
-        let hart = self.get_hart_mut(hart_id).unwrap();
+    /// Write vector register bytes by index (for segment load/store).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the hart cannot be resolved.
+    fn set_vreg_bytes_by_idx(&mut self, hart_id: HartId, idx: usize, bytes: Vec<u8>) -> Result<(), DebuggerError> {
+        let hart = self.get_hart_mut(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?;
         if idx != 0 && idx < hart.v.regs.len() {
             hart.v.regs[idx].bytes = bytes;
         }
+        Ok(())
     }
 
-    /// Get current LMUL setting for the hart
-    fn get_lmul(&self, hart_id: HartId) -> usize {
-        let hart = self.get_hart(hart_id).unwrap();
-        hart.vector_state.lmul
+    /// Get current LMUL setting for the hart.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the hart cannot be resolved.
+    fn get_lmul(&self, hart_id: HartId) -> Result<usize, DebuggerError> {
+        let hart = self.get_hart(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?;
+        Ok(hart.vector_state.lmul)
     }
 
-    /// Read bytes from a vector register group (LMUL consecutive registers)
-    fn get_vreg_group_bytes(&self, hart_id: HartId, reg: Option<&String>, lmul: usize) -> Vec<u8> {
-        let start_idx = self.vreg(&reg.cloned());
+    /// Read bytes from a vector register group (LMUL consecutive registers).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the register name or hart cannot be resolved.
+    fn get_vreg_group_bytes(&self, hart_id: HartId, reg: Option<&String>, lmul: usize) -> Result<Vec<u8>, DebuggerError> {
+        let start_idx = self.vreg(&reg.cloned())?;
         let mut group_bytes = Vec::with_capacity(64 * lmul);
         for r in 0..lmul {
-            let reg_bytes = self.get_vreg_bytes_by_idx(hart_id, (start_idx + r) % 32);
+            let reg_bytes = self.get_vreg_bytes_by_idx(hart_id, (start_idx + r) % 32)?;
             let take = (64).min(reg_bytes.len());
             group_bytes.extend_from_slice(&reg_bytes[..take]);
         }
-        group_bytes
+        Ok(group_bytes)
     }
 
-    /// Write bytes to a vector register group, splitting across LMUL consecutive registers
-    fn set_vreg_group_bytes(&mut self, hart_id: HartId, reg: Option<&String>, bytes: &[u8], lmul: usize) {
-        let start_idx = self.vreg(&reg.cloned());
+    /// Write bytes to a vector register group, splitting across LMUL consecutive registers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the register name or hart cannot be resolved.
+    fn set_vreg_group_bytes(&mut self, hart_id: HartId, reg: Option<&String>, bytes: &[u8], lmul: usize) -> Result<(), DebuggerError> {
+        let start_idx = self.vreg(&reg.cloned())?;
         let bytes_per_reg = 64usize;
         for r in 0..lmul {
             let offset = r * bytes_per_reg;
@@ -1356,17 +1478,22 @@ impl Machine {
                 let mut reg_bytes = vec![0u8; bytes_per_reg];
                 let copy_len = end - offset;
                 reg_bytes[..copy_len].copy_from_slice(&bytes[offset..end]);
-                self.set_vreg_bytes_by_idx(hart_id, (start_idx + r) % 32, reg_bytes);
+                self.set_vreg_bytes_by_idx(hart_id, (start_idx + r) % 32, reg_bytes)?;
             }
         }
+        Ok(())
     }
 
-    /// Get SEW (selected element width) in bytes from vtype
-    fn get_sew_bytes(&self, hart_id: HartId) -> usize {
-        let hart = self.get_hart(hart_id).unwrap();
+    /// Get SEW (selected element width) in bytes from vtype.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the hart cannot be resolved.
+    fn get_sew_bytes(&self, hart_id: HartId) -> Result<usize, DebuggerError> {
+        let hart = self.get_hart(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?;
         let vtype = hart.csr.vtype;
         let sew_enc = ((vtype >> 3) & 0x7) as u8;
-        match sew_enc {
+        Ok(match sew_enc {
             0b000 => 1,  // e8
             0b001 => 2,  // e16
             0b010 => 4,  // e32
@@ -1376,18 +1503,29 @@ impl Machine {
             0b110 => 64, // e512
             0b111 => 128,// e1024
             _ => 4,
+        })
+    }
+
+    /// Get VL (vector length) from CSR.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the hart cannot be resolved.
+    fn get_vl(&self, hart_id: HartId) -> Result<usize, DebuggerError> {
+        let hart = self.get_hart(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?;
+        Ok(hart.csr.vl as usize)
+    }
+
+    /// Get effective element width: explicit width from name takes priority over SEW.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the hart cannot be resolved while falling back to SEW.
+    fn get_elem_width(&self, hart_id: HartId, name: &str) -> Result<usize, DebuggerError> {
+        match Instruction::get_elem_width_from_name(name) {
+            Some(width) => Ok(width),
+            None => self.get_sew_bytes(hart_id),
         }
-    }
-
-    /// Get VL (vector length) from CSR
-    fn get_vl(&self, hart_id: HartId) -> usize {
-        let hart = self.get_hart(hart_id).unwrap();
-        hart.csr.vl as usize
-    }
-
-    /// Get effective element width: explicit width from name takes priority over SEW
-    fn get_elem_width(&self, hart_id: HartId, name: &str) -> usize {
-        Instruction::get_elem_width_from_name(name).unwrap_or_else(|| self.get_sew_bytes(hart_id))
     }
 
     /// Check if instruction is masked (option is "v0.t")
@@ -1501,7 +1639,7 @@ impl Machine {
         };
 
         {
-            let hart = self.get_hart_mut(hart_id).unwrap();
+            let hart = self.get_hart_mut(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?;
             hart.csr.vl = vl as u64;
             hart.csr.vtype = vtypei;
             hart.vector_state.vl = vl;
@@ -1510,7 +1648,7 @@ impl Machine {
             hart.csr.vlenb = vlen_bytes as u64;
         }
 
-        self.set_x(hart_id, inst.get_r0(), vl as u64);
+        self.set_x(hart_id, inst.get_r0(), vl as u64)?;
         self.next_pc(hart_id)?;
         Ok(())
     }
@@ -1518,10 +1656,10 @@ impl Machine {
     /// Execute vector value instructions (VV/VX/VI forms)
     fn execute_vvalue(&mut self, hart_id: HartId, inst: &Instruction) -> Result<(), DebuggerError> {
         let name = inst.get_instruction_name().to_lowercase();
-        let vl = self.get_vl(hart_id);
-        let sew = self.get_elem_width(hart_id, &name);
+        let vl = self.get_vl(hart_id)?;
+        let sew = self.get_elem_width(hart_id, &name)?;
         let masked = Self::is_masked(inst);
-        let lmul = self.get_lmul(hart_id);
+        let lmul = self.get_lmul(hart_id)?;
 
         if vl == 0 {
             self.next_pc(hart_id)?;
@@ -1544,11 +1682,11 @@ impl Machine {
 
         let group_bytes = 64 * lmul;
 
-        let vs2_bytes = self.get_vreg_group_bytes(hart_id, inst.get_r1(), lmul);
+        let vs2_bytes = self.get_vreg_group_bytes(hart_id, inst.get_r1(), lmul)?;
         let vs1_bytes = if is_vx || is_vi {
             Vec::new()
         } else {
-            self.get_vreg_group_bytes(hart_id, inst.get_r2(), lmul)
+            self.get_vreg_group_bytes(hart_id, inst.get_r2(), lmul)?
         };
 
         let vs1_scalar = if is_vx || is_vi {
@@ -1572,7 +1710,7 @@ impl Machine {
         let is_macc = op_name == "madd" || op_name == "nmsub" || op_name == "macc" || op_name == "nmacc";
 
         let vd_orig_bytes = if is_macc {
-            self.get_vreg_group_bytes(hart_id, inst.get_r0(), lmul)
+            self.get_vreg_group_bytes(hart_id, inst.get_r0(), lmul)?
         } else {
             Vec::new()
         };
@@ -1596,7 +1734,7 @@ impl Machine {
             if byte_offset + sew > group_bytes { break; }
 
             if masked {
-                let v0_bytes = self.get_vreg_group_bytes(hart_id, Some(&"v0".to_string()), lmul);
+                let v0_bytes = self.get_vreg_group_bytes(hart_id, Some(&"v0".to_string()), lmul)?;
                 let mask_byte = v0_bytes.get(byte_offset).copied().unwrap_or(0);
                 if mask_byte & 1 == 0 { continue; }
             }
@@ -1685,7 +1823,7 @@ impl Machine {
             Self::write_elem(&mut vd_bytes, byte_offset, sew, result);
         }
 
-        self.set_vreg_group_bytes(hart_id, inst.get_r0(), &vd_bytes, lmul);
+        self.set_vreg_group_bytes(hart_id, inst.get_r0(), &vd_bytes, lmul)?;
         self.next_pc(hart_id)?;
         Ok(())
     }
@@ -1693,9 +1831,9 @@ impl Machine {
     /// Execute vector load instructions
     fn execute_vload(&mut self, hart_id: HartId, inst: &Instruction, proc_idx: usize) -> Result<(), DebuggerError> {
         let name = inst.get_instruction_name().to_lowercase();
-        let vl = self.get_vl(hart_id);
-        let sew = self.get_elem_width(hart_id, &name);
-        let lmul = self.get_lmul(hart_id);
+        let vl = self.get_vl(hart_id)?;
+        let sew = self.get_elem_width(hart_id, &name)?;
+        let lmul = self.get_lmul(hart_id)?;
 
         if vl == 0 {
             self.next_pc(hart_id)?;
@@ -1707,7 +1845,7 @@ impl Machine {
             else if name.contains("vl2r") { 2 }
             else { 1 };
 
-        let vd_start_idx = self.vreg(&inst.get_r0().cloned());
+        let vd_start_idx = self.vreg(&inst.get_r0().cloned())?;
         let base_addr = self.get_x(hart_id, inst.get_r1())?;
 
         let is_strided = name.starts_with("vlse");
@@ -1721,7 +1859,7 @@ impl Machine {
             0
         };
         let vindex_bytes = if is_indexed {
-            Some(self.get_vreg_group_bytes(hart_id, inst.get_r2(), lmul))
+            Some(self.get_vreg_group_bytes(hart_id, inst.get_r2(), lmul)?)
         } else {
             None
         };
@@ -1735,7 +1873,7 @@ impl Machine {
                     vd_bytes[b] = self.processors[proc_idx].memory.read_u8(addr)?;
                 }
                 let reg_idx = (vd_start_idx + field) % 32;
-                self.set_vreg_bytes_by_idx(hart_id, reg_idx, vd_bytes);
+                self.set_vreg_bytes_by_idx(hart_id, reg_idx, vd_bytes)?;
             }
         } else {
             let group_bytes = 64 * lmul;
@@ -1746,7 +1884,9 @@ impl Machine {
                 if byte_offset + sew > group_bytes { break; }
 
                 let addr = if is_indexed {
-                    let vindex = vindex_bytes.as_ref().unwrap();
+                    let vindex = vindex_bytes.as_ref().ok_or_else(|| {
+                        DebuggerError::ExecutionError("indexed load: vindex register missing".into())
+                    })?;
                     let idx_elem = Self::read_elem(vindex, i * sew, sew);
                     // RISC-V spec: indexed load/store uses the index value directly
                     // as a byte offset (both ordered and unordered variants)
@@ -1768,7 +1908,7 @@ impl Machine {
                 Self::write_elem(&mut vd_bytes, byte_offset, sew, val);
             }
 
-            self.set_vreg_group_bytes(hart_id, inst.get_r0(), &vd_bytes, lmul);
+            self.set_vreg_group_bytes(hart_id, inst.get_r0(), &vd_bytes, lmul)?;
         }
 
         self.next_pc(hart_id)?;
@@ -1778,9 +1918,9 @@ impl Machine {
     /// Execute vector store instructions
     fn execute_vstore(&mut self, hart_id: HartId, inst: &Instruction, proc_idx: usize) -> Result<(), DebuggerError> {
         let name = inst.get_instruction_name().to_lowercase();
-        let vl = self.get_vl(hart_id);
-        let sew = self.get_elem_width(hart_id, &name);
-        let lmul = self.get_lmul(hart_id);
+        let vl = self.get_vl(hart_id)?;
+        let sew = self.get_elem_width(hart_id, &name)?;
+        let lmul = self.get_lmul(hart_id)?;
 
         if vl == 0 {
             self.next_pc(hart_id)?;
@@ -1792,7 +1932,7 @@ impl Machine {
             else if name.contains("vs2r") { 2 }
             else { 1 };
 
-        let vd_start_idx = self.vreg(&inst.get_r0().cloned());
+        let vd_start_idx = self.vreg(&inst.get_r0().cloned())?;
         let base_addr = self.get_x(hart_id, inst.get_r1())?;
 
         let is_strided = name.starts_with("vsse");
@@ -1806,7 +1946,7 @@ impl Machine {
             0
         };
         let vindex_bytes = if is_indexed {
-            Some(self.get_vreg_group_bytes(hart_id, inst.get_r2(), lmul))
+            Some(self.get_vreg_group_bytes(hart_id, inst.get_r2(), lmul)?)
         } else {
             None
         };
@@ -1815,14 +1955,14 @@ impl Machine {
             let bytes_per_reg = 64;
             for field in 0..nfields {
                 let reg_idx = (vd_start_idx + field) % 32;
-                let vs_bytes = self.get_vreg_bytes_by_idx(hart_id, reg_idx);
+                let vs_bytes = self.get_vreg_bytes_by_idx(hart_id, reg_idx)?;
                 for b in 0..bytes_per_reg {
                     let addr = base_addr.wrapping_add((field * bytes_per_reg + b) as u64);
-                    self.processors[proc_idx].memory.write_u8(addr, vs_bytes.get(b).copied().unwrap_or(0));
+                    self.processors[proc_idx].memory.write_u8(addr, vs_bytes.get(b).copied().unwrap_or(0))?;
                 }
             }
         } else {
-            let vs3_bytes = self.get_vreg_group_bytes(hart_id, inst.get_r0(), lmul);
+            let vs3_bytes = self.get_vreg_group_bytes(hart_id, inst.get_r0(), lmul)?;
 
             let group_bytes = 64 * lmul;
             for i in 0..vl {
@@ -1830,7 +1970,9 @@ impl Machine {
                 if byte_offset + sew > group_bytes { break; }
 
                 let addr = if is_indexed {
-                    let vindex = vindex_bytes.as_ref().unwrap();
+                    let vindex = vindex_bytes.as_ref().ok_or_else(|| {
+                        DebuggerError::ExecutionError("indexed store: vindex register missing".into())
+                    })?;
                     let idx_elem = Self::read_elem(vindex, i * sew, sew);
                     // RISC-V spec: indexed load/store uses the index value directly
                     // as a byte offset (both ordered and unordered variants)
@@ -1859,10 +2001,10 @@ impl Machine {
     /// Execute vector reduction instructions
     fn execute_vreduction(&mut self, hart_id: HartId, inst: &Instruction) -> Result<(), DebuggerError> {
         let name = inst.get_instruction_name().to_lowercase();
-        let vl = self.get_vl(hart_id);
-        let sew = self.get_elem_width(hart_id, &name);
+        let vl = self.get_vl(hart_id)?;
+        let sew = self.get_elem_width(hart_id, &name)?;
         let masked = Self::is_masked(inst);
-        let lmul = self.get_lmul(hart_id);
+        let lmul = self.get_lmul(hart_id)?;
 
         if vl == 0 {
             self.next_pc(hart_id)?;
@@ -1870,8 +2012,8 @@ impl Machine {
         }
 
         let base_name = name.split('.').next().unwrap_or(&name);
-        let vs2_bytes = self.get_vreg_group_bytes(hart_id, inst.get_r1(), lmul);
-        let vs1_bytes = self.get_vreg_group_bytes(hart_id, inst.get_r2(), lmul);
+        let vs2_bytes = self.get_vreg_group_bytes(hart_id, inst.get_r1(), lmul)?;
+        let vs1_bytes = self.get_vreg_group_bytes(hart_id, inst.get_r2(), lmul)?;
 
         let vs1_elem = Self::read_elem(&vs1_bytes, 0, sew);
         let mut result = vs1_elem;
@@ -1882,7 +2024,7 @@ impl Machine {
             if byte_offset + sew > group_bytes { break; }
 
             if masked {
-                let v0_bytes = self.get_vreg_group_bytes(hart_id, Some(&"v0".to_string()), lmul);
+                let v0_bytes = self.get_vreg_group_bytes(hart_id, Some(&"v0".to_string()), lmul)?;
                 let mask_byte = v0_bytes.get(byte_offset).copied().unwrap_or(0);
                 if mask_byte & 1 == 0 { continue; }
             }
@@ -1907,7 +2049,7 @@ impl Machine {
 
         let mut vd_bytes = vec![0u8; 64];
         Self::write_elem(&mut vd_bytes, 0, sew, result);
-        self.set_vreg_bytes(hart_id, inst.get_r0(), vd_bytes);
+        self.set_vreg_bytes(hart_id, inst.get_r0(), vd_bytes)?;
         self.next_pc(hart_id)?;
         Ok(())
     }
@@ -1942,18 +2084,18 @@ impl Machine {
     /// Execute vector mask instructions (vand.mm, vor.mm, vxor.mm, vnot.m)
     fn execute_vmask(&mut self, hart_id: HartId, inst: &Instruction) -> Result<(), DebuggerError> {
         let name = inst.get_instruction_name().to_lowercase();
-        let vl = self.get_vl(hart_id);
+        let vl = self.get_vl(hart_id)?;
 
         if vl == 0 {
             self.next_pc(hart_id)?;
             return Ok(());
         }
 
-        let vs1_bytes = self.get_vreg_bytes(hart_id, inst.get_r1());
+        let vs1_bytes = self.get_vreg_bytes(hart_id, inst.get_r1())?;
         let vs2_bytes = if name.starts_with("vnot") {
             None
         } else {
-            Some(self.get_vreg_bytes(hart_id, inst.get_r2()))
+            Some(self.get_vreg_bytes(hart_id, inst.get_r2())?)
         };
 
         let base_name = name.split('.').next().unwrap_or(&name);
@@ -1976,7 +2118,7 @@ impl Machine {
             }
         }
 
-        self.set_vreg_bytes(hart_id, inst.get_r0(), vd_bytes);
+        self.set_vreg_bytes(hart_id, inst.get_r0(), vd_bytes)?;
         self.next_pc(hart_id)?;
         Ok(())
     }
@@ -2036,7 +2178,7 @@ impl Machine {
                 if inst.get_r2().is_none() {
                     let lhs = self.get_x(hart_id, inst.get_r0())?;
                     let rhs = self.get_x(hart_id, inst.get_r1())?;
-                    self.set_x(hart_id, inst.get_r0(), lhs & rhs);
+                    self.set_x(hart_id, inst.get_r0(), lhs & rhs)?;
                     self.next_pc(hart_id)?;
                 } else {
                     self.binary_operation(hart_id, &inst, |a, b| a & b)?;
@@ -2053,69 +2195,69 @@ impl Machine {
             OpCode::Andn => {
                 let lhs = self.get_x(hart_id, inst.get_r1())?;
                 let rhs = self.get_x(hart_id, inst.get_r2())?;
-                self.set_x(hart_id, inst.get_r0(), lhs & !rhs);
+                self.set_x(hart_id, inst.get_r0(), lhs & !rhs)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Orn => {
                 let lhs = self.get_x(hart_id, inst.get_r1())?;
                 let rhs = self.get_x(hart_id, inst.get_r2())?;
-                self.set_x(hart_id, inst.get_r0(), lhs | !rhs);
+                self.set_x(hart_id, inst.get_r0(), lhs | !rhs)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Xnor => {
                 let lhs = self.get_x(hart_id, inst.get_r1())?;
                 let rhs = self.get_x(hart_id, inst.get_r2())?;
-                self.set_x(hart_id, inst.get_r0(), !(lhs ^ rhs));
+                self.set_x(hart_id, inst.get_r0(), !(lhs ^ rhs))?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Rol => {
                 let lhs = self.get_x(hart_id, inst.get_r1())?;
                 let rhs = self.get_x(hart_id, inst.get_r2())?;
                 let shamt = (rhs & 0x3f) as u32;
-                self.set_x(hart_id, inst.get_r0(), lhs.rotate_left(shamt));
+                self.set_x(hart_id, inst.get_r0(), lhs.rotate_left(shamt))?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Ror => {
                 let lhs = self.get_x(hart_id, inst.get_r1())?;
                 let rhs = self.get_x(hart_id, inst.get_r2())?;
                 let shamt = (rhs & 0x3f) as u32;
-                self.set_x(hart_id, inst.get_r0(), lhs.rotate_right(shamt));
+                self.set_x(hart_id, inst.get_r0(), lhs.rotate_right(shamt))?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Rori => {
                 let lhs = self.get_x(hart_id, inst.get_r1())?;
                 let shamt = (self.get_resolved_u64(hart_id, inst)? & 0x3f) as u32;
-                self.set_x(hart_id, inst.get_r0(), lhs.rotate_right(shamt));
+                self.set_x(hart_id, inst.get_r0(), lhs.rotate_right(shamt))?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Clz => {
                 let val = self.get_x(hart_id, inst.get_r1())?;
-                self.set_x(hart_id, inst.get_r0(), val.leading_zeros() as u64);
+                self.set_x(hart_id, inst.get_r0(), val.leading_zeros() as u64)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Ctz => {
                 let val = self.get_x(hart_id, inst.get_r1())?;
-                self.set_x(hart_id, inst.get_r0(), val.trailing_zeros() as u64);
+                self.set_x(hart_id, inst.get_r0(), val.trailing_zeros() as u64)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Cpop => {
                 let val = self.get_x(hart_id, inst.get_r1())?;
-                self.set_x(hart_id, inst.get_r0(), val.count_ones() as u64);
+                self.set_x(hart_id, inst.get_r0(), val.count_ones() as u64)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Sextb => {
                 let val = self.get_x(hart_id, inst.get_r1())? as i8 as i64 as u64;
-                self.set_x(hart_id, inst.get_r0(), val);
+                self.set_x(hart_id, inst.get_r0(), val)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Sexth => {
                 let val = self.get_x(hart_id, inst.get_r1())? as i16 as i64 as u64;
-                self.set_x(hart_id, inst.get_r0(), val);
+                self.set_x(hart_id, inst.get_r0(), val)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Zexth => {
                 let val = self.get_x(hart_id, inst.get_r1())? as u16 as u64;
-                self.set_x(hart_id, inst.get_r0(), val);
+                self.set_x(hart_id, inst.get_r0(), val)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Orcb => {
@@ -2126,120 +2268,120 @@ impl Machine {
                         result |= 0xffu64 << (i * 8);
                     }
                 }
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Rev8 => {
                 let val = self.get_x(hart_id, inst.get_r1())?;
                 let result = val.swap_bytes();
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Bclr => {
                 let lhs = self.get_x(hart_id, inst.get_r1())?;
                 let rhs = self.get_x(hart_id, inst.get_r2())?;
-                self.set_x(hart_id, inst.get_r0(), lhs & !(1u64 << (rhs & 0x3f)));
+                self.set_x(hart_id, inst.get_r0(), lhs & !(1u64 << (rhs & 0x3f)))?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Bclri => {
                 let lhs = self.get_x(hart_id, inst.get_r1())?;
                 let shamt = self.get_resolved_u64(hart_id, inst)? & 0x3f;
-                self.set_x(hart_id, inst.get_r0(), lhs & !(1u64 << shamt));
+                self.set_x(hart_id, inst.get_r0(), lhs & !(1u64 << shamt))?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Bset => {
                 let lhs = self.get_x(hart_id, inst.get_r1())?;
                 let rhs = self.get_x(hart_id, inst.get_r2())?;
-                self.set_x(hart_id, inst.get_r0(), lhs | (1u64 << (rhs & 0x3f)));
+                self.set_x(hart_id, inst.get_r0(), lhs | (1u64 << (rhs & 0x3f)))?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Bseti => {
                 let lhs = self.get_x(hart_id, inst.get_r1())?;
                 let shamt = self.get_resolved_u64(hart_id, inst)? & 0x3f;
-                self.set_x(hart_id, inst.get_r0(), lhs | (1u64 << shamt));
+                self.set_x(hart_id, inst.get_r0(), lhs | (1u64 << shamt))?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Bext => {
                 let lhs = self.get_x(hart_id, inst.get_r1())?;
                 let rhs = self.get_x(hart_id, inst.get_r2())?;
-                self.set_x(hart_id, inst.get_r0(), (lhs >> (rhs & 0x3f)) & 1);
+                self.set_x(hart_id, inst.get_r0(), (lhs >> (rhs & 0x3f)) & 1)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Bexti => {
                 let lhs = self.get_x(hart_id, inst.get_r1())?;
                 let shamt = self.get_resolved_u64(hart_id, inst)? & 0x3f;
-                self.set_x(hart_id, inst.get_r0(), (lhs >> shamt) & 1);
+                self.set_x(hart_id, inst.get_r0(), (lhs >> shamt) & 1)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Binv => {
                 let lhs = self.get_x(hart_id, inst.get_r1())?;
                 let rhs = self.get_x(hart_id, inst.get_r2())?;
-                self.set_x(hart_id, inst.get_r0(), lhs ^ (1u64 << (rhs & 0x3f)));
+                self.set_x(hart_id, inst.get_r0(), lhs ^ (1u64 << (rhs & 0x3f)))?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Binvi => {
                 let lhs = self.get_x(hart_id, inst.get_r1())?;
                 let shamt = self.get_resolved_u64(hart_id, inst)? & 0x3f;
-                self.set_x(hart_id, inst.get_r0(), lhs ^ (1u64 << shamt));
+                self.set_x(hart_id, inst.get_r0(), lhs ^ (1u64 << shamt))?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Min => {
                 let lhs = self.get_x(hart_id, inst.get_r1())? as i64;
                 let rhs = self.get_x(hart_id, inst.get_r2())? as i64;
-                self.set_x(hart_id, inst.get_r0(), lhs.min(rhs) as u64);
+                self.set_x(hart_id, inst.get_r0(), lhs.min(rhs) as u64)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Minu => {
                 let lhs = self.get_x(hart_id, inst.get_r1())?;
                 let rhs = self.get_x(hart_id, inst.get_r2())?;
-                self.set_x(hart_id, inst.get_r0(), lhs.min(rhs));
+                self.set_x(hart_id, inst.get_r0(), lhs.min(rhs))?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Max => {
                 let lhs = self.get_x(hart_id, inst.get_r1())? as i64;
                 let rhs = self.get_x(hart_id, inst.get_r2())? as i64;
-                self.set_x(hart_id, inst.get_r0(), lhs.max(rhs) as u64);
+                self.set_x(hart_id, inst.get_r0(), lhs.max(rhs) as u64)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Maxu => {
                 let lhs = self.get_x(hart_id, inst.get_r1())?;
                 let rhs = self.get_x(hart_id, inst.get_r2())?;
-                self.set_x(hart_id, inst.get_r0(), lhs.max(rhs));
+                self.set_x(hart_id, inst.get_r0(), lhs.max(rhs))?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Clzw => {
                 let val = self.get_x(hart_id, inst.get_r1())? as u32;
-                self.set_x(hart_id, inst.get_r0(), (val.leading_zeros() as i32 as i64) as u64);
+                self.set_x(hart_id, inst.get_r0(), (val.leading_zeros() as i32 as i64) as u64)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Ctzw => {
                 let val = self.get_x(hart_id, inst.get_r1())? as u32;
-                self.set_x(hart_id, inst.get_r0(), (val.trailing_zeros() as i32 as i64) as u64);
+                self.set_x(hart_id, inst.get_r0(), (val.trailing_zeros() as i32 as i64) as u64)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Cpopw => {
                 let val = self.get_x(hart_id, inst.get_r1())? as u32;
-                self.set_x(hart_id, inst.get_r0(), (val.count_ones() as i32 as i64) as u64);
+                self.set_x(hart_id, inst.get_r0(), (val.count_ones() as i32 as i64) as u64)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Rolw => {
                 let lhs = self.get_x(hart_id, inst.get_r1())? as u32;
                 let rhs = self.get_x(hart_id, inst.get_r2())?;
                 let shamt = (rhs & 0x1f) as u32;
-                self.set_x(hart_id, inst.get_r0(), (lhs.rotate_left(shamt) as i32 as i64) as u64);
+                self.set_x(hart_id, inst.get_r0(), (lhs.rotate_left(shamt) as i32 as i64) as u64)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Rorw => {
                 let lhs = self.get_x(hart_id, inst.get_r1())? as u32;
                 let rhs = self.get_x(hart_id, inst.get_r2())?;
                 let shamt = (rhs & 0x1f) as u32;
-                self.set_x(hart_id, inst.get_r0(), (lhs.rotate_right(shamt) as i32 as i64) as u64);
+                self.set_x(hart_id, inst.get_r0(), (lhs.rotate_right(shamt) as i32 as i64) as u64)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Roriw => {
                 let lhs = self.get_x(hart_id, inst.get_r1())? as u32;
                 let shamt = (self.get_resolved_u64(hart_id, inst)? & 0x1f) as u32;
-                self.set_x(hart_id, inst.get_r0(), (lhs.rotate_right(shamt) as i32 as i64) as u64);
+                self.set_x(hart_id, inst.get_r0(), (lhs.rotate_right(shamt) as i32 as i64) as u64)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Addi => {
@@ -2469,8 +2611,9 @@ impl Machine {
                 self.next_pc(hart_id)?;
             }
             OpCode::Sb => {
-                let value = self.get_x(hart_id, inst.get_r2())?;  // rs2 = value to store
-                let base = self.get_x(hart_id, inst.get_r1())?;   // rs1 = base address
+                // Assembler layout for stores: r0 = value (rs2), r1 = base (rs1), r2 = None.
+                let value = self.get_x(hart_id, inst.get_r0())?;
+                let base = self.get_x(hart_id, inst.get_r1())?;
 
                 let imm = self.get_resolved_i64(hart_id, inst)?;
                 let addr = base.wrapping_add_signed(imm);
@@ -2483,8 +2626,9 @@ impl Machine {
                 self.next_pc(hart_id)?;
             }
             OpCode::Sh => {
-                let value = self.get_x(hart_id, inst.get_r2())?;  // rs2 = value to store
-                let base = self.get_x(hart_id, inst.get_r1())?;   // rs1 = base address
+                // Assembler layout for stores: r0 = value (rs2), r1 = base (rs1), r2 = None.
+                let value = self.get_x(hart_id, inst.get_r0())?;
+                let base = self.get_x(hart_id, inst.get_r1())?;
 
                 let imm = self.get_resolved_i64(hart_id, inst)?;
                 let addr = base.wrapping_add_signed(imm);
@@ -2497,8 +2641,9 @@ impl Machine {
                 self.next_pc(hart_id)?;
             }
             OpCode::Sw => {
-                let value = self.get_x(hart_id, inst.get_r2())?;  // rs2 = value to store
-                let base = self.get_x(hart_id, inst.get_r1())?;   // rs1 = base address
+                // Assembler layout for stores: r0 = value (rs2), r1 = base (rs1), r2 = None.
+                let value = self.get_x(hart_id, inst.get_r0())?;
+                let base = self.get_x(hart_id, inst.get_r1())?;
 
                 let imm = self.get_resolved_i64(hart_id, inst)?;
                 let addr = base.wrapping_add_signed(imm);
@@ -2511,8 +2656,9 @@ impl Machine {
                 self.next_pc(hart_id)?;
             }
             OpCode::Sd => {
-                let value = self.get_x(hart_id, inst.get_r2())?;  // rs2 = value to store
-                let base = self.get_x(hart_id, inst.get_r1())?;   // rs1 = base address
+                // Assembler layout for stores: r0 = value (rs2), r1 = base (rs1), r2 = None.
+                let value = self.get_x(hart_id, inst.get_r0())?;
+                let base = self.get_x(hart_id, inst.get_r1())?;
 
                 let imm = self.get_resolved_i64(hart_id, inst)?;
                 let addr = base.wrapping_add_signed(imm);
@@ -2525,8 +2671,9 @@ impl Machine {
                 self.next_pc(hart_id)?;
             }
             OpCode::Beq => {
-                let lhs = self.get_x(hart_id, inst.get_r1())?;  // rs1
-                let rhs = self.get_x(hart_id, inst.get_r2())?;  // rs2
+                // Assembler layout for branches: r0 = rs1, r1 = rs2, r2 = None.
+                let lhs = self.get_x(hart_id, inst.get_r0())?;
+                let rhs = self.get_x(hart_id, inst.get_r1())?;
 
                 if lhs == rhs {
                     self.branch_to_target(hart_id)?;
@@ -2535,8 +2682,8 @@ impl Machine {
                 }
             }
             OpCode::Bne => {
-                let lhs = self.get_x(hart_id, inst.get_r1())?;  // rs1
-                let rhs = self.get_x(hart_id, inst.get_r2())?;  // rs2
+                let lhs = self.get_x(hart_id, inst.get_r0())?;
+                let rhs = self.get_x(hart_id, inst.get_r1())?;
 
                 if lhs != rhs {
                     self.branch_to_target(hart_id)?;
@@ -2545,8 +2692,8 @@ impl Machine {
                 }
             }
             OpCode::Blt => {
-                let lhs = self.get_x(hart_id, inst.get_r1())? as i64;  // rs1
-                let rhs = self.get_x(hart_id, inst.get_r2())? as i64;  // rs2
+                let lhs = self.get_x(hart_id, inst.get_r0())? as i64;
+                let rhs = self.get_x(hart_id, inst.get_r1())? as i64;
 
                 if lhs < rhs {
                     self.branch_to_target(hart_id)?;
@@ -2555,8 +2702,8 @@ impl Machine {
                 }
             }
             OpCode::Bge => {
-                let lhs = self.get_x(hart_id, inst.get_r1())? as i64;  // rs1
-                let rhs = self.get_x(hart_id, inst.get_r2())? as i64;  // rs2
+                let lhs = self.get_x(hart_id, inst.get_r0())? as i64;
+                let rhs = self.get_x(hart_id, inst.get_r1())? as i64;
 
                 if lhs >= rhs {
                     self.branch_to_target(hart_id)?;
@@ -2565,8 +2712,8 @@ impl Machine {
                 }
             }
             OpCode::Bltu => {
-                let lhs = self.get_x(hart_id, inst.get_r1())?;  // rs1
-                let rhs = self.get_x(hart_id, inst.get_r2())?;  // rs2
+                let lhs = self.get_x(hart_id, inst.get_r0())?;
+                let rhs = self.get_x(hart_id, inst.get_r1())?;
 
                 if lhs < rhs {
                     self.branch_to_target(hart_id)?;
@@ -2575,8 +2722,8 @@ impl Machine {
                 }
             }
             OpCode::Bgeu => {
-                let lhs = self.get_x(hart_id, inst.get_r1())?;  // rs1
-                let rhs = self.get_x(hart_id, inst.get_r2())?;  // rs2
+                let lhs = self.get_x(hart_id, inst.get_r0())?;
+                let rhs = self.get_x(hart_id, inst.get_r1())?;
 
                 if lhs >= rhs {
                     self.branch_to_target(hart_id)?;
@@ -2730,88 +2877,88 @@ impl Machine {
             }
             OpCode::Fsqrts => {
                 let val = self.get_f32(hart_id, inst.get_r1())?;
-                self.set_f32(hart_id, inst.get_r0(), val.sqrt());
+                self.set_f32(hart_id, inst.get_r0(), val.sqrt())?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fsqrtd => {
                 let val = self.get_f(hart_id, inst.get_r1())?;
-                self.set_f(hart_id, inst.get_r0(), val.sqrt());
+                self.set_f(hart_id, inst.get_r0(), val.sqrt())?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fsgnjs => {
                 let lhs = self.get_f32(hart_id, inst.get_r1())?;
                 let rhs = self.get_f32(hart_id, inst.get_r2())?;
                 let result = f32::from_bits((lhs.to_bits() & !(1u32 << 31)) | (rhs.to_bits() & (1u32 << 31)));
-                self.set_f32(hart_id, inst.get_r0(), result);
+                self.set_f32(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fsgnjns => {
                 let lhs = self.get_f32(hart_id, inst.get_r1())?;
                 let rhs = self.get_f32(hart_id, inst.get_r2())?;
                 let result = f32::from_bits((lhs.to_bits() & !(1u32 << 31)) | (!rhs.to_bits() & (1u32 << 31)));
-                self.set_f32(hart_id, inst.get_r0(), result);
+                self.set_f32(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fsgnjxs => {
                 let lhs = self.get_f32(hart_id, inst.get_r1())?;
                 let rhs = self.get_f32(hart_id, inst.get_r2())?;
                 let result = f32::from_bits(lhs.to_bits() ^ (rhs.to_bits() & (1u32 << 31)));
-                self.set_f32(hart_id, inst.get_r0(), result);
+                self.set_f32(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fsgnjd => {
                 let lhs = self.get_f(hart_id, inst.get_r1())?;
                 let rhs = self.get_f(hart_id, inst.get_r2())?;
                 let result = f64::from_bits((lhs.to_bits() & !(1u64 << 63)) | (rhs.to_bits() & (1u64 << 63)));
-                self.set_f(hart_id, inst.get_r0(), result);
+                self.set_f(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fsgnjnd => {
                 let lhs = self.get_f(hart_id, inst.get_r1())?;
                 let rhs = self.get_f(hart_id, inst.get_r2())?;
                 let result = f64::from_bits((lhs.to_bits() & !(1u64 << 63)) | (!rhs.to_bits() & (1u64 << 63)));
-                self.set_f(hart_id, inst.get_r0(), result);
+                self.set_f(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fsgnjxd => {
                 let lhs = self.get_f(hart_id, inst.get_r1())?;
                 let rhs = self.get_f(hart_id, inst.get_r2())?;
                 let result = f64::from_bits(lhs.to_bits() ^ (rhs.to_bits() & (1u64 << 63)));
-                self.set_f(hart_id, inst.get_r0(), result);
+                self.set_f(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fmins => {
                 let lhs = self.get_f32(hart_id, inst.get_r1())?;
                 let rhs = self.get_f32(hart_id, inst.get_r2())?;
-                self.set_f32(hart_id, inst.get_r0(), lhs.min(rhs));
+                self.set_f32(hart_id, inst.get_r0(), lhs.min(rhs))?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fmaxs => {
                 let lhs = self.get_f32(hart_id, inst.get_r1())?;
                 let rhs = self.get_f32(hart_id, inst.get_r2())?;
-                self.set_f32(hart_id, inst.get_r0(), lhs.max(rhs));
+                self.set_f32(hart_id, inst.get_r0(), lhs.max(rhs))?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fmind => {
                 let lhs = self.get_f(hart_id, inst.get_r1())?;
                 let rhs = self.get_f(hart_id, inst.get_r2())?;
-                self.set_f(hart_id, inst.get_r0(), lhs.min(rhs));
+                self.set_f(hart_id, inst.get_r0(), lhs.min(rhs))?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fmaxd => {
                 let lhs = self.get_f(hart_id, inst.get_r1())?;
                 let rhs = self.get_f(hart_id, inst.get_r2())?;
-                self.set_f(hart_id, inst.get_r0(), lhs.max(rhs));
+                self.set_f(hart_id, inst.get_r0(), lhs.max(rhs))?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fcvtsd => {
                 let val = self.get_f32(hart_id, inst.get_r1())? as f64;
-                self.set_f(hart_id, inst.get_r0(), val);
+                self.set_f(hart_id, inst.get_r0(), val)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fcvtds => {
                 let val = self.get_f(hart_id, inst.get_r1())? as f32;
-                self.set_f32(hart_id, inst.get_r0(), val);
+                self.set_f32(hart_id, inst.get_r0(), val)?;
                 self.next_pc(hart_id)?;
             }
             // NOTE: Floating-point to integer conversions (Fcvtws, Fcvtwd, Fcvtls, Fcvtld, etc.)
@@ -2821,84 +2968,84 @@ impl Machine {
             // rounding modes (RNE, RUP, RDN, RMM) may produce incorrect results.
             OpCode::Fcvtws => {
                 let val = self.get_f32(hart_id, inst.get_r1())? as i32 as i64 as u64;
-                self.set_x(hart_id, inst.get_r0(), val);
+                self.set_x(hart_id, inst.get_r0(), val)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fcvtwus => {
                 let val = self.get_f32(hart_id, inst.get_r1())?;
                 let result = (val as u32) as u64;
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fcvtwd => {
                 let val = self.get_f(hart_id, inst.get_r1())? as i32 as i64 as u64;
-                self.set_x(hart_id, inst.get_r0(), val);
+                self.set_x(hart_id, inst.get_r0(), val)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fcvtwud => {
                 let val = self.get_f(hart_id, inst.get_r1())?;
                 let result = (val as u32) as u64;
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fcvtsw => {
                 let val = self.get_x(hart_id, inst.get_r1())? as i32 as f32;
-                self.set_f32(hart_id, inst.get_r0(), val);
+                self.set_f32(hart_id, inst.get_r0(), val)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fcvtswu => {
                 let val = self.get_x(hart_id, inst.get_r1())? as u32 as f32;
-                self.set_f32(hart_id, inst.get_r0(), val);
+                self.set_f32(hart_id, inst.get_r0(), val)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fcvtdw => {
                 let val = self.get_x(hart_id, inst.get_r1())? as i32 as f64;
-                self.set_f(hart_id, inst.get_r0(), val);
+                self.set_f(hart_id, inst.get_r0(), val)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fcvtdwu => {
                 let val = self.get_x(hart_id, inst.get_r1())? as u32 as f64;
-                self.set_f(hart_id, inst.get_r0(), val);
+                self.set_f(hart_id, inst.get_r0(), val)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fcvtls => {
                 let val = self.get_f32(hart_id, inst.get_r1())? as i64 as u64;
-                self.set_x(hart_id, inst.get_r0(), val);
+                self.set_x(hart_id, inst.get_r0(), val)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fcvtlus => {
                 let val = self.get_f32(hart_id, inst.get_r1())? as u64;
-                self.set_x(hart_id, inst.get_r0(), val);
+                self.set_x(hart_id, inst.get_r0(), val)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fcvtld => {
                 let val = self.get_f(hart_id, inst.get_r1())? as i64 as u64;
-                self.set_x(hart_id, inst.get_r0(), val);
+                self.set_x(hart_id, inst.get_r0(), val)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fcvtlud => {
                 let val = self.get_f(hart_id, inst.get_r1())? as u64;
-                self.set_x(hart_id, inst.get_r0(), val);
+                self.set_x(hart_id, inst.get_r0(), val)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fcvtsl => {
                 let val = self.get_x(hart_id, inst.get_r1())? as i64 as f32;
-                self.set_f32(hart_id, inst.get_r0(), val);
+                self.set_f32(hart_id, inst.get_r0(), val)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fcvtslu => {
                 let val = self.get_x(hart_id, inst.get_r1())? as f32;
-                self.set_f32(hart_id, inst.get_r0(), val);
+                self.set_f32(hart_id, inst.get_r0(), val)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fcvtdl => {
                 let val = self.get_x(hart_id, inst.get_r1())? as i64 as f64;
-                self.set_f(hart_id, inst.get_r0(), val);
+                self.set_f(hart_id, inst.get_r0(), val)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fcvtdlu => {
                 let val = self.get_x(hart_id, inst.get_r1())? as f64;
-                self.set_f(hart_id, inst.get_r0(), val);
+                self.set_f(hart_id, inst.get_r0(), val)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fclasss => {
@@ -2915,7 +3062,7 @@ impl Machine {
                 } else {
                     if bits & (1u32 << 31) != 0 { 1 << 1 } else { 1 << 6 }
                 };
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fclassd => {
@@ -2932,18 +3079,18 @@ impl Machine {
                 } else {
                     if bits & (1u64 << 63) != 0 { 1 << 1 } else { 1 << 6 }
                 };
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fmvxw => {
                 let val = self.get_f32(hart_id, inst.get_r1())?;
                 // RV64: sign-extend bits 31:0 into bits 63:32
-                self.set_x(hart_id, inst.get_r0(), (val.to_bits() as i32 as i64) as u64);
+                self.set_x(hart_id, inst.get_r0(), (val.to_bits() as i32 as i64) as u64)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fmvwx => {
                 let val = self.get_x(hart_id, inst.get_r1())? as u32;
-                self.set_f32(hart_id, inst.get_r0(), f32::from_bits(val));
+                self.set_f32(hart_id, inst.get_r0(), f32::from_bits(val))?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Feqd => {
@@ -3047,8 +3194,9 @@ impl Machine {
                 self.next_pc(hart_id)?;
             }
             OpCode::Fsd => {
-                let bits = self.get_f_bits(hart_id, inst.get_r2())?;  // rs2 = float reg to store
-                let base = self.get_x(hart_id, inst.get_r1())?;       // rs1 = base address
+                // Assembler layout for stores: r0 = value reg, r1 = base, r2 = None.
+                let bits = self.get_f_bits(hart_id, inst.get_r0())?;
+                let base = self.get_x(hart_id, inst.get_r1())?;
                 let imm = self.get_resolved_i64(hart_id, inst)?;
                 let addr = base.wrapping_add_signed(imm);
 
@@ -3060,56 +3208,56 @@ impl Machine {
                 let a = self.get_f32(hart_id, inst.get_r1())?;
                 let b = self.get_f32(hart_id, inst.get_r2())?;
                 let c = self.get_f32(hart_id, inst.get_r3())?;
-                self.set_f32(hart_id, inst.get_r0(), a.mul_add(b, c));
+                self.set_f32(hart_id, inst.get_r0(), a.mul_add(b, c))?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fmsubs => {
                 let a = self.get_f32(hart_id, inst.get_r1())?;
                 let b = self.get_f32(hart_id, inst.get_r2())?;
                 let c = self.get_f32(hart_id, inst.get_r3())?;
-                self.set_f32(hart_id, inst.get_r0(), a.mul_add(b, -c));
+                self.set_f32(hart_id, inst.get_r0(), a.mul_add(b, -c))?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fnmsubs => {
                 let a = self.get_f32(hart_id, inst.get_r1())?;
                 let b = self.get_f32(hart_id, inst.get_r2())?;
                 let c = self.get_f32(hart_id, inst.get_r3())?;
-                self.set_f32(hart_id, inst.get_r0(), -(a.mul_add(b, -c)));
+                self.set_f32(hart_id, inst.get_r0(), -(a.mul_add(b, -c)))?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fnmadds => {
                 let a = self.get_f32(hart_id, inst.get_r1())?;
                 let b = self.get_f32(hart_id, inst.get_r2())?;
                 let c = self.get_f32(hart_id, inst.get_r3())?;
-                self.set_f32(hart_id, inst.get_r0(), -(a.mul_add(b, c)));
+                self.set_f32(hart_id, inst.get_r0(), -(a.mul_add(b, c)))?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fmaddd => {
                 let a = self.get_f(hart_id, inst.get_r1())?;
                 let b = self.get_f(hart_id, inst.get_r2())?;
                 let c = self.get_f(hart_id, inst.get_r3())?;
-                self.set_f(hart_id, inst.get_r0(), a.mul_add(b, c));
+                self.set_f(hart_id, inst.get_r0(), a.mul_add(b, c))?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fmsubd => {
                 let a = self.get_f(hart_id, inst.get_r1())?;
                 let b = self.get_f(hart_id, inst.get_r2())?;
                 let c = self.get_f(hart_id, inst.get_r3())?;
-                self.set_f(hart_id, inst.get_r0(), a.mul_add(b, -c));
+                self.set_f(hart_id, inst.get_r0(), a.mul_add(b, -c))?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fnmsubd => {
                 let a = self.get_f(hart_id, inst.get_r1())?;
                 let b = self.get_f(hart_id, inst.get_r2())?;
                 let c = self.get_f(hart_id, inst.get_r3())?;
-                self.set_f(hart_id, inst.get_r0(), -(a.mul_add(b, -c)));
+                self.set_f(hart_id, inst.get_r0(), -(a.mul_add(b, -c)))?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fnmaddd => {
                 let a = self.get_f(hart_id, inst.get_r1())?;
                 let b = self.get_f(hart_id, inst.get_r2())?;
                 let c = self.get_f(hart_id, inst.get_r3())?;
-                self.set_f(hart_id, inst.get_r0(), -(a.mul_add(b, c)));
+                self.set_f(hart_id, inst.get_r0(), -(a.mul_add(b, c)))?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Flw => {
@@ -3117,15 +3265,16 @@ impl Machine {
                 let imm = self.get_resolved_i64(hart_id, inst)?;
                 let addr = base.wrapping_add_signed(imm);
                 let bits = self.processors[proc_idx].memory.read_u32(addr)?;
-                self.set_f32(hart_id, inst.get_r0(), f32::from_bits(bits));
+                self.set_f32(hart_id, inst.get_r0(), f32::from_bits(bits))?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Fsw => {
-                let val = self.get_f32(hart_id, inst.get_r2())?; // rs2 = float reg to store
-                let base = self.get_x(hart_id, inst.get_r1())?;  // rs1 = base address
+                // Assembler layout for stores: r0 = value reg, r1 = base, r2 = None.
+                let val = self.get_f32(hart_id, inst.get_r0())?;
+                let base = self.get_x(hart_id, inst.get_r1())?;
                 let imm = self.get_resolved_i64(hart_id, inst)?;
                 let addr = base.wrapping_add_signed(imm);
-                self.processors[proc_idx].memory.write_u32(addr, val.to_bits());
+                self.processors[proc_idx].memory.write_u32(addr, val.to_bits())?;
                 self.next_pc(hart_id)?;
             }
             // ============================================================
@@ -3135,7 +3284,7 @@ impl Machine {
                 let rs1 = self.get_x(hart_id, inst.get_r1())?;
                 let rs2 = self.get_x(hart_id, inst.get_r2())?;
                 let result = (rs1 & 0xFFFFFFFF) | (rs2 << 32);
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Packh => {
@@ -3148,7 +3297,7 @@ impl Machine {
                     result |= rs1_byte << (i * 16);
                     result |= rs2_byte << (i * 16 + 8);
                 }
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Packw => {
@@ -3157,7 +3306,7 @@ impl Machine {
                 let lo = rs1 & 0xFFFF;
                 let hi = rs2 & 0xFFFF;
                 let result = (lo | (hi << 16)) as i32 as i64 as u64;
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Brev8 => {
@@ -3168,7 +3317,7 @@ impl Machine {
                     let rev = byte.reverse_bits();
                     result |= (rev as u64) << (i * 8);
                 }
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Zip => {
@@ -3180,7 +3329,7 @@ impl Machine {
                     result |= low_bit << (2 * i);
                     result |= high_bit << (2 * i + 1);
                 }
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Unzip => {
@@ -3192,7 +3341,7 @@ impl Machine {
                     result |= low_bit << i;
                     result |= high_bit << (i + 32);
                 }
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             // ============================================================
@@ -3207,7 +3356,7 @@ impl Machine {
                     let nibble = (rs2 >> (idx * 4)) & 0xF;
                     result |= nibble << (i * 4);
                 }
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Xperm8 => {
@@ -3222,7 +3371,7 @@ impl Machine {
                         result |= byte << (i * 8);
                     }
                 }
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             // ============================================================
@@ -3234,7 +3383,7 @@ impl Machine {
                 let rs1 = self.get_x(hart_id, inst.get_r1())?;
                 let rs2 = self.get_x(hart_id, inst.get_r2())?;
                 let result = aes64_inv_mix_columns(aes64_inv_sub_bytes(rs1)) ^ rs2;
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             // AES decrypt middle round: InvMixColumns(rs1) ^ rs2
@@ -3242,7 +3391,7 @@ impl Machine {
                 let rs1 = self.get_x(hart_id, inst.get_r1())?;
                 let rs2 = self.get_x(hart_id, inst.get_r2())?;
                 let result = aes64_inv_mix_columns(rs1) ^ rs2;
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             // AES encrypt (final round): MixColumns(SubBytes(rs1)) ^ rs2
@@ -3250,7 +3399,7 @@ impl Machine {
                 let rs1 = self.get_x(hart_id, inst.get_r1())?;
                 let rs2 = self.get_x(hart_id, inst.get_r2())?;
                 let result = aes64_mix_columns(aes64_sub_bytes(rs1)) ^ rs2;
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             // AES encrypt middle round: MixColumns(rs1) ^ rs2
@@ -3258,14 +3407,14 @@ impl Machine {
                 let rs1 = self.get_x(hart_id, inst.get_r1())?;
                 let rs2 = self.get_x(hart_id, inst.get_r2())?;
                 let result = aes64_mix_columns(rs1) ^ rs2;
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             // AES intermediate mix columns: InvMixColumns(rs1)
             OpCode::Aes64im => {
                 let rs1 = self.get_x(hart_id, inst.get_r1())?;
                 let result = aes64_inv_mix_columns(rs1);
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             // AES key schedule round constant: extract rnum from encoded imm (0x310 | rnum)
@@ -3273,7 +3422,7 @@ impl Machine {
                 let rs1 = self.get_x(hart_id, inst.get_r1())?;
                 let rnum = (self.get_resolved_u64(hart_id, inst)? & 0xF) as u32;
                 let result = aes64_ks1i(rs1, rnum);
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             // AES key schedule word XOR
@@ -3281,7 +3430,7 @@ impl Machine {
                 let rs1 = self.get_x(hart_id, inst.get_r1())?;
                 let rs2 = self.get_x(hart_id, inst.get_r2())?;
                 let result = aes64_ks2(rs1, rs2);
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             // ============================================================
@@ -3290,25 +3439,25 @@ impl Machine {
             OpCode::Sha256sig0 => {
                 let val = self.get_x(hart_id, inst.get_r1())?;
                 let result = val.rotate_right(7) ^ val.rotate_right(18) ^ (val >> 3);
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Sha256sig1 => {
                 let val = self.get_x(hart_id, inst.get_r1())?;
                 let result = val.rotate_right(17) ^ val.rotate_right(19) ^ (val >> 10);
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Sha256sum0 => {
                 let val = self.get_x(hart_id, inst.get_r1())?;
                 let result = val.rotate_right(2) ^ val.rotate_right(13) ^ val.rotate_right(22);
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Sha256sum1 => {
                 let val = self.get_x(hart_id, inst.get_r1())?;
                 let result = val.rotate_right(6) ^ val.rotate_right(11) ^ val.rotate_right(25);
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             // ============================================================
@@ -3317,25 +3466,25 @@ impl Machine {
             OpCode::Sha512sig0 => {
                 let val = self.get_x(hart_id, inst.get_r1())?;
                 let result = val.rotate_right(1) ^ val.rotate_right(8) ^ (val >> 7);
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Sha512sig1 => {
                 let val = self.get_x(hart_id, inst.get_r1())?;
                 let result = val.rotate_right(19) ^ val.rotate_right(61) ^ (val >> 6);
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Sha512sum0 => {
                 let val = self.get_x(hart_id, inst.get_r1())?;
                 let result = val.rotate_right(28) ^ val.rotate_right(34) ^ val.rotate_right(39);
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Sha512sum1 => {
                 let val = self.get_x(hart_id, inst.get_r1())?;
                 let result = val.rotate_right(14) ^ val.rotate_right(18) ^ val.rotate_right(41);
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             // ============================================================
@@ -3344,13 +3493,13 @@ impl Machine {
             OpCode::Sm3p0 => {
                 let val = self.get_x(hart_id, inst.get_r1())?;
                 let result = val ^ val.rotate_right(9) ^ val.rotate_right(17);
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             OpCode::Sm3p1 => {
                 let val = self.get_x(hart_id, inst.get_r1())?;
                 let result = val ^ val.rotate_right(15) ^ val.rotate_right(23);
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc(hart_id)?;
             }
             // ============================================================
@@ -3363,17 +3512,17 @@ impl Machine {
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = base.wrapping_add(imm);
                 let val = self.processors[proc_idx].memory.read_u32(addr)? as i32 as i64 as u64;
-                self.set_x(hart_id, inst.get_r0(), val);
+                self.set_x(hart_id, inst.get_r0(), val)?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.LWSP: Load word from stack pointer (x2 + offset)
             // PEG: rd, imm → r0=rd, r1=None. Must use sp (x2) as base.
             OpCode::Clwsp => {
-                let sp = self.get_hart(hart_id).unwrap().x.regs[2].value;
+                let sp = self.get_hart(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?.x.regs[2].value;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = sp.wrapping_add(imm);
                 let val = self.processors[proc_idx].memory.read_u32(addr)? as i32 as i64 as u64;
-                self.set_x(hart_id, inst.get_r0(), val);
+                self.set_x(hart_id, inst.get_r0(), val)?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.LD: Load doubleword from memory
@@ -3382,17 +3531,17 @@ impl Machine {
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = base.wrapping_add(imm);
                 let val = self.processors[proc_idx].memory.read_u64(addr)?;
-                self.set_x(hart_id, inst.get_r0(), val);
+                self.set_x(hart_id, inst.get_r0(), val)?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.LDSP: Load doubleword from stack pointer
             // PEG: rd, imm → r0=rd, r1=None. Must use sp (x2) as base.
             OpCode::Cldsp => {
-                let sp = self.get_hart(hart_id).unwrap().x.regs[2].value;
+                let sp = self.get_hart(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?.x.regs[2].value;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = sp.wrapping_add(imm);
                 let val = self.processors[proc_idx].memory.read_u64(addr)?;
-                self.set_x(hart_id, inst.get_r0(), val);
+                self.set_x(hart_id, inst.get_r0(), val)?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.LQ: Load quadword (128-bit) - simplified to load lower 64 bits
@@ -3401,17 +3550,17 @@ impl Machine {
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = base.wrapping_add(imm);
                 let val = self.processors[proc_idx].memory.read_u64(addr)?;
-                self.set_x(hart_id, inst.get_r0(), val);
+                self.set_x(hart_id, inst.get_r0(), val)?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.LQSP: Load quadword from stack pointer - simplified
             // PEG: rd, imm → r0=rd, r1=None. Must use sp (x2) as base.
             OpCode::Clqsp => {
-                let sp = self.get_hart(hart_id).unwrap().x.regs[2].value;
+                let sp = self.get_hart(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?.x.regs[2].value;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = sp.wrapping_add(imm);
                 let val = self.processors[proc_idx].memory.read_u64(addr)?;
-                self.set_x(hart_id, inst.get_r0(), val);
+                self.set_x(hart_id, inst.get_r0(), val)?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.SW: Store word to memory
@@ -3421,17 +3570,17 @@ impl Machine {
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = base.wrapping_add(imm);
                 let val = self.get_x(hart_id, inst.get_r1())? as u32;
-                self.processors[proc_idx].memory.write_u32(addr, val);
+                self.processors[proc_idx].memory.write_u32(addr, val)?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.SWSP: Store word to stack pointer
             // PEG: rs2, imm → r0=rs2, r1=None. Must use sp (x2) as base.
             OpCode::Cswsp => {
-                let sp = self.get_hart(hart_id).unwrap().x.regs[2].value;
+                let sp = self.get_hart(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?.x.regs[2].value;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = sp.wrapping_add(imm);
                 let val = self.get_x(hart_id, inst.get_r0())? as u32;
-                self.processors[proc_idx].memory.write_u32(addr, val);
+                self.processors[proc_idx].memory.write_u32(addr, val)?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.SD: Store doubleword to memory
@@ -3441,17 +3590,17 @@ impl Machine {
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = base.wrapping_add(imm);
                 let val = self.get_x(hart_id, inst.get_r1())?;
-                self.processors[proc_idx].memory.write_u64(addr, val);
+                self.processors[proc_idx].memory.write_u64(addr, val)?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.SDSP: Store doubleword to stack pointer
             // PEG: rs2, imm → r0=rs2, r1=None. Must use sp (x2) as base.
             OpCode::Csdsp => {
-                let sp = self.get_hart(hart_id).unwrap().x.regs[2].value;
+                let sp = self.get_hart(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?.x.regs[2].value;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = sp.wrapping_add(imm);
                 let val = self.get_x(hart_id, inst.get_r0())?;
-                self.processors[proc_idx].memory.write_u64(addr, val);
+                self.processors[proc_idx].memory.write_u64(addr, val)?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.SQ: Store quadword - simplified to store 64 bits
@@ -3461,17 +3610,17 @@ impl Machine {
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = base.wrapping_add(imm);
                 let val = self.get_x(hart_id, inst.get_r1())?;
-                self.processors[proc_idx].memory.write_u64(addr, val);
+                self.processors[proc_idx].memory.write_u64(addr, val)?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.SQSP: Store quadword to stack pointer - simplified
             // PEG: rs2, imm → r0=rs2, r1=None. Must use sp (x2) as base.
             OpCode::Csqsp => {
-                let sp = self.get_hart(hart_id).unwrap().x.regs[2].value;
+                let sp = self.get_hart(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?.x.regs[2].value;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = sp.wrapping_add(imm);
                 let val = self.get_x(hart_id, inst.get_r0())?;
-                self.processors[proc_idx].memory.write_u64(addr, val);
+                self.processors[proc_idx].memory.write_u64(addr, val)?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.FLW: Load float (single-precision)
@@ -3480,17 +3629,17 @@ impl Machine {
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = base.wrapping_add(imm);
                 let val = self.processors[proc_idx].memory.read_u32(addr)?;
-                self.set_f32(hart_id, inst.get_r0(), f32::from_bits(val));
+                self.set_f32(hart_id, inst.get_r0(), f32::from_bits(val))?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.FLWSP: Load float from stack pointer
             // PEG: rd, imm → r0=rd, r1=None. Must use sp (x2) as base.
             OpCode::Cflwsp => {
-                let sp = self.get_hart(hart_id).unwrap().x.regs[2].value;
+                let sp = self.get_hart(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?.x.regs[2].value;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = sp.wrapping_add(imm);
                 let val = self.processors[proc_idx].memory.read_u32(addr)?;
-                self.set_f32(hart_id, inst.get_r0(), f32::from_bits(val));
+                self.set_f32(hart_id, inst.get_r0(), f32::from_bits(val))?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.FLD: Load double
@@ -3499,17 +3648,17 @@ impl Machine {
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = base.wrapping_add(imm);
                 let val = self.processors[proc_idx].memory.read_u64(addr)?;
-                self.set_f(hart_id, inst.get_r0(), f64::from_bits(val));
+                self.set_f(hart_id, inst.get_r0(), f64::from_bits(val))?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.FLDSP: Load double from stack pointer
             // PEG: rd, imm → r0=rd, r1=None. Must use sp (x2) as base.
             OpCode::Cfldsp => {
-                let sp = self.get_hart(hart_id).unwrap().x.regs[2].value;
+                let sp = self.get_hart(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?.x.regs[2].value;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = sp.wrapping_add(imm);
                 let val = self.processors[proc_idx].memory.read_u64(addr)?;
-                self.set_f(hart_id, inst.get_r0(), f64::from_bits(val));
+                self.set_f(hart_id, inst.get_r0(), f64::from_bits(val))?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.FSW: Store float
@@ -3519,17 +3668,17 @@ impl Machine {
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = base.wrapping_add(imm);
                 let val = self.get_f32(hart_id, inst.get_r1())?;
-                self.processors[proc_idx].memory.write_u32(addr, val.to_bits());
+                self.processors[proc_idx].memory.write_u32(addr, val.to_bits())?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.FSWSP: Store float to stack pointer
             // PEG: rs2, imm → r0=rs2, r1=None. Must use sp (x2) as base.
             OpCode::Cfswsp => {
-                let sp = self.get_hart(hart_id).unwrap().x.regs[2].value;
+                let sp = self.get_hart(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?.x.regs[2].value;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = sp.wrapping_add(imm);
                 let val = self.get_f32(hart_id, inst.get_r0())?;
-                self.processors[proc_idx].memory.write_u32(addr, val.to_bits());
+                self.processors[proc_idx].memory.write_u32(addr, val.to_bits())?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.FSD: Store double
@@ -3539,25 +3688,25 @@ impl Machine {
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = base.wrapping_add(imm);
                 let val = self.get_f(hart_id, inst.get_r1())?;
-                self.processors[proc_idx].memory.write_u64(addr, val.to_bits());
+                self.processors[proc_idx].memory.write_u64(addr, val.to_bits())?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.FSDSP: Store double to stack pointer
             // PEG: rs2, imm → r0=rs2, r1=None. Must use sp (x2) as base.
             OpCode::Cfsdsp => {
-                let sp = self.get_hart(hart_id).unwrap().x.regs[2].value;
+                let sp = self.get_hart(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?.x.regs[2].value;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
                 let addr = sp.wrapping_add(imm);
                 let val = self.get_f(hart_id, inst.get_r0())?;
-                self.processors[proc_idx].memory.write_u64(addr, val.to_bits());
+                self.processors[proc_idx].memory.write_u64(addr, val.to_bits())?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.ADDI4SPN: Add immediate * 4 to sp, store in rd
             // PEG: rd, imm → r0=rd, r1=None. Must use sp (x2).
             OpCode::Caddi4spn => {
-                let sp_val = self.get_hart(hart_id).unwrap().x.regs[2].value;
+                let sp_val = self.get_hart(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?.x.regs[2].value;
                 let imm = self.get_u64_from_imm(hart_id, inst.get_imm())?;
-                self.set_x(hart_id, inst.get_r0(), sp_val.wrapping_add(imm));
+                self.set_x(hart_id, inst.get_r0(), sp_val.wrapping_add(imm))?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.ADDI: Add immediate (rd = rd + imm). PEG: rd, imm → r0=rd, r1=None→x0.
@@ -3565,7 +3714,7 @@ impl Machine {
             OpCode::Caddi => {
                 let rd_val = self.get_x(hart_id, inst.get_r0())?;
                 let imm = self.get_i64_from_imm(hart_id, inst.get_imm())?;
-                self.set_x(hart_id, inst.get_r0(), (rd_val as i64).wrapping_add(imm) as u64);
+                self.set_x(hart_id, inst.get_r0(), (rd_val as i64).wrapping_add(imm) as u64)?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.ADDIW: Add word immediate (rd = (rd as i32) + imm). PEG: rd, imm → r0=rd, r1=None→x0.
@@ -3573,30 +3722,30 @@ impl Machine {
                 let rd_val = self.get_x(hart_id, inst.get_r0())?;
                 let imm = self.get_i64_from_imm(hart_id, inst.get_imm())?;
                 let result = (rd_val as i32).wrapping_add(imm as i32) as i64 as u64;
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.ADDI16SP: Add immediate * 16 to sp. PEG: c.addi16sp x0, imm → r0=x0, r1=None.
             // Must use sp (x2) as both source and destination.
             OpCode::Caddi16sp => {
-                let sp_val = self.get_hart(hart_id).unwrap().x.regs[2].value;
+                let sp_val = self.get_hart(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?.x.regs[2].value;
                 let imm = self.get_i64_from_imm(hart_id, inst.get_imm())?;
                 let result = (sp_val as i64).wrapping_add(imm) as u64;
-                let hart = self.get_hart_mut(hart_id).unwrap();
+                let hart = self.get_hart_mut(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?;
                 hart.x.regs[2].value = result;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.LI: Load immediate (rd = imm, rs1 = x0)
             OpCode::Cli => {
                 let imm = self.get_i64_from_imm(hart_id, inst.get_imm())?;
-                self.set_x(hart_id, inst.get_r0(), imm as u64);
+                self.set_x(hart_id, inst.get_r0(), imm as u64)?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.LUI: Load upper immediate (imm is already shifted by PEG: create_compact_inc_from_current with bits 17..12)
             OpCode::Clui => {
                 let imm = self.get_i64_from_imm(hart_id, inst.get_imm())?;
                 // PEG stores the raw imm value; lui shifts left by 12
-                self.set_x(hart_id, inst.get_r0(), ((imm as i64) << 12) as u64);
+                self.set_x(hart_id, inst.get_r0(), ((imm as i64) << 12) as u64)?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.SLLI: Shift left logical immediate (RV32). PEG: rd, shamt → r0=rd, r1=None→x0.
@@ -3604,62 +3753,62 @@ impl Machine {
             OpCode::Cslli => {
                 let rd_val = self.get_x(hart_id, inst.get_r0())?;
                 let shamt = self.get_u64_from_imm(hart_id, inst.get_imm())? & 0x1F;
-                self.set_x(hart_id, inst.get_r0(), rd_val << shamt);
+                self.set_x(hart_id, inst.get_r0(), rd_val << shamt)?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.SLLI64: Shift left logical immediate (RV64)
             OpCode::Cslli64 => {
                 let rd_val = self.get_x(hart_id, inst.get_r0())?;
                 let shamt = self.get_u64_from_imm(hart_id, inst.get_imm())? & 0x3F;
-                self.set_x(hart_id, inst.get_r0(), rd_val << shamt);
+                self.set_x(hart_id, inst.get_r0(), rd_val << shamt)?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.SRLI: Shift right logical immediate. PEG: rd, shamt → r0=rd.
             OpCode::Csrli => {
                 let rd_val = self.get_x(hart_id, inst.get_r0())?;
                 let shamt = self.get_u64_from_imm(hart_id, inst.get_imm())? & 0x1F;
-                self.set_x(hart_id, inst.get_r0(), rd_val >> shamt);
+                self.set_x(hart_id, inst.get_r0(), rd_val >> shamt)?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.SRLI64: Shift right logical immediate (RV64)
             OpCode::Csrli64 => {
                 let rd_val = self.get_x(hart_id, inst.get_r0())?;
                 let shamt = self.get_u64_from_imm(hart_id, inst.get_imm())? & 0x3F;
-                self.set_x(hart_id, inst.get_r0(), rd_val >> shamt);
+                self.set_x(hart_id, inst.get_r0(), rd_val >> shamt)?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.SRAI: Shift right arithmetic immediate. PEG: rd, shamt → r0=rd.
             OpCode::Csrai => {
                 let rd_val = self.get_x(hart_id, inst.get_r0())? as i32 as i64;
                 let shamt = self.get_u64_from_imm(hart_id, inst.get_imm())? & 0x1F;
-                self.set_x(hart_id, inst.get_r0(), (rd_val >> shamt) as u64);
+                self.set_x(hart_id, inst.get_r0(), (rd_val >> shamt) as u64)?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.SRAI64: Shift right arithmetic immediate (RV64)
             OpCode::Csrai64 => {
                 let rd_val = self.get_x(hart_id, inst.get_r0())? as i64;
                 let shamt = self.get_u64_from_imm(hart_id, inst.get_imm())? & 0x3F;
-                self.set_x(hart_id, inst.get_r0(), (rd_val >> shamt) as u64);
+                self.set_x(hart_id, inst.get_r0(), (rd_val >> shamt) as u64)?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.ANDI: And immediate (rd = rd & imm). PEG: rd, imm → r0=rd, r1=None→x0.
             OpCode::Candi => {
                 let rd_val = self.get_x(hart_id, inst.get_r0())?;
                 let imm = self.get_i64_from_imm(hart_id, inst.get_imm())?;
-                self.set_x(hart_id, inst.get_r0(), rd_val & (imm as u64));
+                self.set_x(hart_id, inst.get_r0(), rd_val & (imm as u64))?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.MV: Move (rd = rs2). PEG: rd, rs1 → r0=rd, r1=rs2
             OpCode::Cmv => {
                 let rs2 = self.get_x(hart_id, inst.get_r1())?;
-                self.set_x(hart_id, inst.get_r0(), rs2);
+                self.set_x(hart_id, inst.get_r0(), rs2)?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.ADD: Add (rd = rd + rs2). PEG: rd, rs1 → r0=rd, r1=rs2
             OpCode::Cadd => {
                 let rd_val = self.get_x(hart_id, inst.get_r0())?;
                 let rs2 = self.get_x(hart_id, inst.get_r1())?;
-                self.set_x(hart_id, inst.get_r0(), rd_val.wrapping_add(rs2));
+                self.set_x(hart_id, inst.get_r0(), rd_val.wrapping_add(rs2))?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.ADDW: Add word (rd = rd + rs2). PEG: rd, rs1 → r0=rd, r1=rs2
@@ -3667,14 +3816,36 @@ impl Machine {
                 let rd_val = self.get_x(hart_id, inst.get_r0())? as i32;
                 let rs2 = self.get_x(hart_id, inst.get_r1())? as i32;
                 let result = rd_val.wrapping_add(rs2) as i64 as u64;
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc_by(hart_id, 2)?;
+            }
+            // `riscv_asm_lib` maps BOTH "ADDW" and "C.ADDW" to `OpCode::Addw`,
+            // so the two forms must be distinguished by the register layout:
+            //   plain ADDW rd, rs1, rs2 → r0=rd, r1=rs1, r2=Some(rs2), 4-byte step
+            //   C.ADDW    rd, rs2       → r0=rd, r1=rs2, r2=None,       2-byte step
+            OpCode::Addw => {
+                let (lhs, rhs, step) = if inst.get_r2().is_some() {
+                    (
+                        self.get_x(hart_id, inst.get_r1())?,
+                        self.get_x(hart_id, inst.get_r2())?,
+                        PC_INCREMENT,
+                    )
+                } else {
+                    (
+                        self.get_x(hart_id, inst.get_r0())?,
+                        self.get_x(hart_id, inst.get_r1())?,
+                        2,
+                    )
+                };
+                let result = (lhs as i32).wrapping_add(rhs as i32) as i64 as u64;
+                self.set_x(hart_id, inst.get_r0(), result)?;
+                self.next_pc_by(hart_id, step)?;
             }
             // C.SUB: Subtract (rd = rd - rs2). PEG: rd, rs1 → r0=rd, r1=rs2
             OpCode::Csub => {
                 let rd_val = self.get_x(hart_id, inst.get_r0())?;
                 let rs2 = self.get_x(hart_id, inst.get_r1())?;
-                self.set_x(hart_id, inst.get_r0(), rd_val.wrapping_sub(rs2));
+                self.set_x(hart_id, inst.get_r0(), rd_val.wrapping_sub(rs2))?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.SUBW: Subtract word (rd = rd - rs2). PEG: rd, rs1 → r0=rd, r1=rs2
@@ -3682,28 +3853,28 @@ impl Machine {
                 let rd_val = self.get_x(hart_id, inst.get_r0())? as i32;
                 let rs2 = self.get_x(hart_id, inst.get_r1())? as i32;
                 let result = rd_val.wrapping_sub(rs2) as i64 as u64;
-                self.set_x(hart_id, inst.get_r0(), result);
+                self.set_x(hart_id, inst.get_r0(), result)?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.XOR: XOR (rd = rd ^ rs2). PEG: rd, rs1 → r0=rd, r1=rs2
             OpCode::Cxor => {
                 let rd_val = self.get_x(hart_id, inst.get_r0())?;
                 let rs2 = self.get_x(hart_id, inst.get_r1())?;
-                self.set_x(hart_id, inst.get_r0(), rd_val ^ rs2);
+                self.set_x(hart_id, inst.get_r0(), rd_val ^ rs2)?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.OR: OR (rd = rd | rs2). PEG: rd, rs1 → r0=rd, r1=rs2
             OpCode::Cor => {
                 let rd_val = self.get_x(hart_id, inst.get_r0())?;
                 let rs2 = self.get_x(hart_id, inst.get_r1())?;
-                self.set_x(hart_id, inst.get_r0(), rd_val | rs2);
+                self.set_x(hart_id, inst.get_r0(), rd_val | rs2)?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.AND: AND (rd = rd & rs2). PEG: rd, rs1 → r0=rd, r1=rs2
             OpCode::Cand => {
                 let rd_val = self.get_x(hart_id, inst.get_r0())?;
                 let rs2 = self.get_x(hart_id, inst.get_r1())?;
-                self.set_x(hart_id, inst.get_r0(), rd_val & rs2);
+                self.set_x(hart_id, inst.get_r0(), rd_val & rs2)?;
                 self.next_pc_by(hart_id, 2)?;
             }
             // C.BEQZ: Branch if equal to zero. PEG: rs1, imm → r0=rs1, r1=None.
@@ -3711,7 +3882,7 @@ impl Machine {
                 let rs1 = self.get_x(hart_id, inst.get_r0())?;
                 if rs1 == 0 {
                     let offset = self.get_i64_from_imm(hart_id, inst.get_imm())?;
-                    let hart = self.get_hart_mut(hart_id).unwrap();
+                    let hart = self.get_hart_mut(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?;
                     hart.pc = ((hart.pc as i64).wrapping_add(offset)) as usize & !1usize;
                 } else {
                     self.next_pc_by(hart_id, 2)?;
@@ -3722,7 +3893,7 @@ impl Machine {
                 let rs1 = self.get_x(hart_id, inst.get_r0())?;
                 if rs1 != 0 {
                     let offset = self.get_i64_from_imm(hart_id, inst.get_imm())?;
-                    let hart = self.get_hart_mut(hart_id).unwrap();
+                    let hart = self.get_hart_mut(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?;
                     hart.pc = ((hart.pc as i64).wrapping_add(offset)) as usize & !1usize;
                 } else {
                     self.next_pc_by(hart_id, 2)?;
@@ -3731,34 +3902,34 @@ impl Machine {
             // C.J: Jump (unconditional)
             OpCode::Cj => {
                 let offset = self.get_i64_from_imm(hart_id, inst.get_imm())?;
-                let hart = self.get_hart_mut(hart_id).unwrap();
+                let hart = self.get_hart_mut(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?;
                 hart.pc = ((hart.pc as i64).wrapping_add(offset)) as usize & !1usize;
             }
             // C.JAL: Jump and link (RV32 only, save return address in ra)
             OpCode::Cjal => {
-                let ra_idx = self.registers.get_register_value(Some(&"ra".to_string())).unwrap() as usize;
+                let ra_idx = self.resolve_reg_index(Some(&"ra".to_string()))?;
                 let offset = self.get_i64_from_imm(hart_id, inst.get_imm())?;
-                let hart = self.get_hart_mut(hart_id).unwrap();
+                let hart = self.get_hart_mut(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?;
                 hart.x.regs[ra_idx].value = (hart.pc + 2) as u64;
                 hart.pc = ((hart.pc as i64).wrapping_add(offset)) as usize & !1usize;
             }
             // C.JR: Jump register (rs1 = target, rd = x0 for C.JR)
             OpCode::Cjr => {
                 let target = self.get_x(hart_id, inst.get_r1())?;
-                let hart = self.get_hart_mut(hart_id).unwrap();
+                let hart = self.get_hart_mut(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?;
                 hart.pc = (target & !1u64) as usize;
             }
             // C.JALR: Jump and link register
             OpCode::Cjalr => {
                 let target = self.get_x(hart_id, inst.get_r1())?;
-                let ra_idx = self.registers.get_register_value(Some(&"ra".to_string())).unwrap() as usize;
-                let hart = self.get_hart_mut(hart_id).unwrap();
+                let ra_idx = self.resolve_reg_index(Some(&"ra".to_string()))?;
+                let hart = self.get_hart_mut(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?;
                 hart.x.regs[ra_idx].value = (hart.pc + 2) as u64;
                 hart.pc = (target & !1u64) as usize;
             }
             // C.EBREAK: Breakpoint (same as EBREAK but compact)
             OpCode::Cebreak => {
-                let hart = self.get_hart_mut(hart_id).unwrap();
+                let hart = self.get_hart_mut(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?;
                 hart.take_trap(EXCEPTION_BREAKPOINT, hart.pc as u64, false);
             }
             // C.NOP: No operation (C.ADDI x0, x0, 0)
@@ -3775,7 +3946,7 @@ impl Machine {
                 let rs1_val = self.get_x(hart_id, inst.get_r1())?;
                 let old_val = self.read_csr(hart_id, csr_addr);
                 self.write_csr(hart_id, csr_addr, rs1_val);
-                self.set_x(hart_id, inst.get_r0(), old_val);
+                self.set_x(hart_id, inst.get_r0(), old_val)?;
                 self.next_pc(hart_id)?;
             }
             // CSRRS rd, csr, rs1: atomic read and set bits in CSR
@@ -3788,7 +3959,7 @@ impl Machine {
                 if rs1_idx != 0 { // if rs1 is x0, don't write (CSRRS pseudo-instruction)
                     self.write_csr(hart_id, csr_addr, old_val | rs1_val);
                 }
-                self.set_x(hart_id, inst.get_r0(), old_val);
+                self.set_x(hart_id, inst.get_r0(), old_val)?;
                 self.next_pc(hart_id)?;
             }
             // CSRRC rd, csr, rs1: atomic read and clear bits in CSR
@@ -3801,7 +3972,7 @@ impl Machine {
                 if rs1_idx != 0 { // if rs1 is x0, don't write (CSRRC pseudo-instruction)
                     self.write_csr(hart_id, csr_addr, old_val & !rs1_val);
                 }
-                self.set_x(hart_id, inst.get_r0(), old_val);
+                self.set_x(hart_id, inst.get_r0(), old_val)?;
                 self.next_pc(hart_id)?;
             }
             // CSRRWI rd, csr, zimm: atomic read/write CSR (immediate)
@@ -3811,7 +3982,7 @@ impl Machine {
                 let zimm = self.get_x(hart_id, inst.get_r1())?; // r1 is uimm[4:0] = zimm
                 let old_val = self.read_csr(hart_id, csr_addr);
                 self.write_csr(hart_id, csr_addr, zimm);
-                self.set_x(hart_id, inst.get_r0(), old_val);
+                self.set_x(hart_id, inst.get_r0(), old_val)?;
                 self.next_pc(hart_id)?;
             }
             // CSRRSI rd, csr, zimm: atomic read and set bits in CSR (immediate)
@@ -3823,7 +3994,7 @@ impl Machine {
                 if zimm != 0 { // if zimm is 0, don't write
                     self.write_csr(hart_id, csr_addr, old_val | zimm);
                 }
-                self.set_x(hart_id, inst.get_r0(), old_val);
+                self.set_x(hart_id, inst.get_r0(), old_val)?;
                 self.next_pc(hart_id)?;
             }
             // CSRRCI rd, csr, zimm: atomic read and clear bits in CSR (immediate)
@@ -3835,12 +4006,12 @@ impl Machine {
                 if zimm != 0 { // if zimm is 0, don't write
                     self.write_csr(hart_id, csr_addr, old_val & !zimm);
                 }
-                self.set_x(hart_id, inst.get_r0(), old_val);
+                self.set_x(hart_id, inst.get_r0(), old_val)?;
                 self.next_pc(hart_id)?;
             }
             // ECALL: Environment call (trap to higher privilege)
             OpCode::Ecall => {
-                let hart = self.get_hart_mut(hart_id).unwrap();
+                let hart = self.get_hart_mut(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?;
                 let cause = match hart.privilege {
                     PrivilegeLevel::User => EXCEPTION_ENVIRONMENT_CALL_FROM_U,
                     PrivilegeLevel::Supervisor => EXCEPTION_ENVIRONMENT_CALL_FROM_S,
@@ -3850,12 +4021,12 @@ impl Machine {
             }
             // EBREAK: Environment breakpoint
             OpCode::Ebreak => {
-                let hart = self.get_hart_mut(hart_id).unwrap();
+                let hart = self.get_hart_mut(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?;
                 hart.take_trap(EXCEPTION_BREAKPOINT, hart.pc as u64, false);
             }
             // MRET: Machine trap return
             OpCode::Mret => {
-                let hart = self.get_hart_mut(hart_id).unwrap();
+                let hart = self.get_hart_mut(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?;
                 let mepc = hart.read_csr(0x341); // mepc
                 let mstatus = hart.read_csr(0x300);
                 // Set privilege to MPP (bits 11:12 of mstatus)
@@ -3876,7 +4047,7 @@ impl Machine {
             }
             // SRET: Supervisor trap return
             OpCode::Sret => {
-                let hart = self.get_hart_mut(hart_id).unwrap();
+                let hart = self.get_hart_mut(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?;
                 let sepc = hart.read_csr(0x141); // sepc
                 let mstatus = hart.read_csr(0x300);
                 // Set privilege to SPP (bit 8 of mstatus)
@@ -3896,7 +4067,7 @@ impl Machine {
             }
             // URET: User trap return
             OpCode::Uret => {
-                let hart = self.get_hart_mut(hart_id).unwrap();
+                let hart = self.get_hart_mut(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?;
                 hart.pc = hart.read_csr(0x041) as usize; // uepc
             }
             // WFI: Wait for interrupt (treated as NOP for now)
@@ -3905,6 +4076,315 @@ impl Machine {
             }
             // FENCE/FENCE.I: Memory ordering (treated as NOP for single-hart)
             OpCode::Fence | OpCode::Fencei => {
+                self.next_pc(hart_id)?;
+            }
+            // ============================================================
+            // RV64 word arithmetic: operate on the low 32 bits, then
+            // sign-extend the 32-bit result to 64 bits.
+            // ============================================================
+            // ADDIW rd, rs1, imm : rd = sext32(rs1 + imm)
+            OpCode::Addiw => {
+                let lhs = self.get_x(hart_id, inst.get_r1())?;
+                let imm = self.get_resolved_i64(hart_id, inst)?;
+                let result = (lhs as i32).wrapping_add(imm as i32) as i64 as u64;
+                self.set_x(hart_id, inst.get_r0(), result)?;
+                self.next_pc(hart_id)?;
+            }
+            // SUBW rd, rs1, rs2 : rd = sext32(rs1 - rs2)
+            OpCode::Subw => {
+                let lhs = self.get_x(hart_id, inst.get_r1())? as i32;
+                let rhs = self.get_x(hart_id, inst.get_r2())? as i32;
+                let result = lhs.wrapping_sub(rhs) as i64 as u64;
+                self.set_x(hart_id, inst.get_r0(), result)?;
+                self.next_pc(hart_id)?;
+            }
+            // SLLW rd, rs1, rs2 : rd = sext32(rs1 << rs2[4:0])
+            OpCode::Sllw => {
+                let lhs = self.get_x(hart_id, inst.get_r1())? as u32;
+                let shamt = (self.get_x(hart_id, inst.get_r2())? & 0x1f) as u32;
+                let result = lhs.wrapping_shl(shamt) as i32 as i64 as u64;
+                self.set_x(hart_id, inst.get_r0(), result)?;
+                self.next_pc(hart_id)?;
+            }
+            // SRLW rd, rs1, rs2 : rd = sext32(zext32(rs1) >> rs2[4:0])
+            OpCode::Srlw => {
+                let lhs = self.get_x(hart_id, inst.get_r1())? as u32;
+                let shamt = (self.get_x(hart_id, inst.get_r2())? & 0x1f) as u32;
+                let result = lhs.wrapping_shr(shamt) as i32 as i64 as u64;
+                self.set_x(hart_id, inst.get_r0(), result)?;
+                self.next_pc(hart_id)?;
+            }
+            // SRAW rd, rs1, rs2 : rd = sext32(sext32(rs1) >> rs2[4:0])
+            OpCode::Sraw => {
+                let lhs = self.get_x(hart_id, inst.get_r1())? as i32;
+                let shamt = (self.get_x(hart_id, inst.get_r2())? & 0x1f) as u32;
+                let result = lhs.wrapping_shr(shamt) as i64 as u64;
+                self.set_x(hart_id, inst.get_r0(), result)?;
+                self.next_pc(hart_id)?;
+            }
+            // SLLIW rd, rs1, shamt : rd = sext32(rs1 << shamt)
+            OpCode::Slliw => {
+                let lhs = self.get_x(hart_id, inst.get_r1())? as u32;
+                let shamt = (self.get_resolved_u64(hart_id, inst)? & 0x1f) as u32;
+                let result = lhs.wrapping_shl(shamt) as i32 as i64 as u64;
+                self.set_x(hart_id, inst.get_r0(), result)?;
+                self.next_pc(hart_id)?;
+            }
+            // SRLIW rd, rs1, shamt : rd = sext32(zext32(rs1) >> shamt)
+            OpCode::Srliw => {
+                let lhs = self.get_x(hart_id, inst.get_r1())? as u32;
+                let shamt = (self.get_resolved_u64(hart_id, inst)? & 0x1f) as u32;
+                let result = lhs.wrapping_shr(shamt) as i32 as i64 as u64;
+                self.set_x(hart_id, inst.get_r0(), result)?;
+                self.next_pc(hart_id)?;
+            }
+            // SRAIW rd, rs1, shamt : rd = sext32(sext32(rs1) >> shamt)
+            OpCode::Sraiw => {
+                let lhs = self.get_x(hart_id, inst.get_r1())? as i32;
+                let shamt = (self.get_resolved_u64(hart_id, inst)? & 0x1f) as u32;
+                let result = lhs.wrapping_shr(shamt) as i64 as u64;
+                self.set_x(hart_id, inst.get_r0(), result)?;
+                self.next_pc(hart_id)?;
+            }
+            // ============================================================
+            // Zba: address calculation
+            // ============================================================
+            // SLLIUW rd, rs1, shamt : rd = zext32(rs1) << shamt
+            OpCode::Slliuw => {
+                let lhs = self.get_x(hart_id, inst.get_r1())? as u32 as u64;
+                let shamt = (self.get_resolved_u64(hart_id, inst)? & 0x3f) as u32;
+                self.set_x(hart_id, inst.get_r0(), lhs.wrapping_shl(shamt))?;
+                self.next_pc(hart_id)?;
+            }
+            // ADDUW rd, rs1, rs2 : rd = rs1 + zext32(rs2)
+            OpCode::Adduw => {
+                let lhs = self.get_x(hart_id, inst.get_r1())?;
+                let rhs = self.get_x(hart_id, inst.get_r2())? as u32 as u64;
+                self.set_x(hart_id, inst.get_r0(), lhs.wrapping_add(rhs))?;
+                self.next_pc(hart_id)?;
+            }
+            // SH1ADD rd, rs1, rs2 : rd = (rs1 << 1) + rs2
+            OpCode::Sh1add => {
+                let lhs = self.get_x(hart_id, inst.get_r1())?;
+                let rhs = self.get_x(hart_id, inst.get_r2())?;
+                self.set_x(hart_id, inst.get_r0(), rhs.wrapping_add(lhs << 1))?;
+                self.next_pc(hart_id)?;
+            }
+            // SH2ADD rd, rs1, rs2 : rd = (rs1 << 2) + rs2
+            OpCode::Sh2add => {
+                let lhs = self.get_x(hart_id, inst.get_r1())?;
+                let rhs = self.get_x(hart_id, inst.get_r2())?;
+                self.set_x(hart_id, inst.get_r0(), rhs.wrapping_add(lhs << 2))?;
+                self.next_pc(hart_id)?;
+            }
+            // SH3ADD rd, rs1, rs2 : rd = (rs1 << 3) + rs2
+            OpCode::Sh3add => {
+                let lhs = self.get_x(hart_id, inst.get_r1())?;
+                let rhs = self.get_x(hart_id, inst.get_r2())?;
+                self.set_x(hart_id, inst.get_r0(), rhs.wrapping_add(lhs << 3))?;
+                self.next_pc(hart_id)?;
+            }
+            // SH1ADDUW rd, rs1, rs2 : rd = (zext32(rs1) << 1) + rs2
+            OpCode::Sh1adduw => {
+                let lhs = self.get_x(hart_id, inst.get_r1())? as u32 as u64;
+                let rhs = self.get_x(hart_id, inst.get_r2())?;
+                self.set_x(hart_id, inst.get_r0(), rhs.wrapping_add(lhs << 1))?;
+                self.next_pc(hart_id)?;
+            }
+            // SH2ADDUW rd, rs1, rs2 : rd = (zext32(rs1) << 2) + rs2
+            OpCode::Sh2adduw => {
+                let lhs = self.get_x(hart_id, inst.get_r1())? as u32 as u64;
+                let rhs = self.get_x(hart_id, inst.get_r2())?;
+                self.set_x(hart_id, inst.get_r0(), rhs.wrapping_add(lhs << 2))?;
+                self.next_pc(hart_id)?;
+            }
+            // SH3ADDUW rd, rs1, rs2 : rd = (zext32(rs1) << 3) + rs2
+            OpCode::Sh3adduw => {
+                let lhs = self.get_x(hart_id, inst.get_r1())? as u32 as u64;
+                let rhs = self.get_x(hart_id, inst.get_r2())?;
+                self.set_x(hart_id, inst.get_r0(), rhs.wrapping_add(lhs << 3))?;
+                self.next_pc(hart_id)?;
+            }
+            // ============================================================
+            // M extension: multiply / divide
+            // ============================================================
+            // MULW rd, rs1, rs2 : rd = sext32(rs1 * rs2)
+            OpCode::Mulw => {
+                let lhs = self.get_x(hart_id, inst.get_r1())? as i32;
+                let rhs = self.get_x(hart_id, inst.get_r2())? as i32;
+                let result = lhs.wrapping_mul(rhs) as i64 as u64;
+                self.set_x(hart_id, inst.get_r0(), result)?;
+                self.next_pc(hart_id)?;
+            }
+            // MULH rd, rs1, rs2 : upper 64 bits of signed x signed
+            OpCode::Mulh => {
+                let lhs = self.get_x(hart_id, inst.get_r1())? as i64;
+                let rhs = self.get_x(hart_id, inst.get_r2())? as i64;
+                let result = (((lhs as i128) * (rhs as i128)) >> 64) as u64;
+                self.set_x(hart_id, inst.get_r0(), result)?;
+                self.next_pc(hart_id)?;
+            }
+            // MULHU rd, rs1, rs2 : upper 64 bits of unsigned x unsigned
+            OpCode::Mulhu => {
+                let lhs = self.get_x(hart_id, inst.get_r1())?;
+                let rhs = self.get_x(hart_id, inst.get_r2())?;
+                let result = (((lhs as u128) * (rhs as u128)) >> 64) as u64;
+                self.set_x(hart_id, inst.get_r0(), result)?;
+                self.next_pc(hart_id)?;
+            }
+            // MULHSU rd, rs1, rs2 : upper 64 bits of signed x unsigned
+            OpCode::Mulhsu => {
+                let lhs = self.get_x(hart_id, inst.get_r1())? as i64;
+                let rhs = self.get_x(hart_id, inst.get_r2())?;
+                let result = (((lhs as i128) * (rhs as u128 as i128)) >> 64) as u64;
+                self.set_x(hart_id, inst.get_r0(), result)?;
+                self.next_pc(hart_id)?;
+            }
+            // DIV rd, rs1, rs2 : signed. Div-by-0 => -1; MIN/-1 => MIN.
+            OpCode::Div => {
+                let lhs = self.get_x(hart_id, inst.get_r1())? as i64;
+                let rhs = self.get_x(hart_id, inst.get_r2())? as i64;
+                let result = if rhs == 0 {
+                    u64::MAX
+                } else if lhs == i64::MIN && rhs == -1 {
+                    lhs as u64
+                } else {
+                    lhs.wrapping_div(rhs) as u64
+                };
+                self.set_x(hart_id, inst.get_r0(), result)?;
+                self.next_pc(hart_id)?;
+            }
+            // DIVU rd, rs1, rs2 : unsigned. Div-by-0 => all ones.
+            OpCode::Divu => {
+                let lhs = self.get_x(hart_id, inst.get_r1())?;
+                let rhs = self.get_x(hart_id, inst.get_r2())?;
+                let result = if rhs == 0 { u64::MAX } else { lhs.wrapping_div(rhs) };
+                self.set_x(hart_id, inst.get_r0(), result)?;
+                self.next_pc(hart_id)?;
+            }
+            // REM rd, rs1, rs2 : signed. Rem-by-0 => rs1; MIN%-1 => 0.
+            OpCode::Rem => {
+                let lhs = self.get_x(hart_id, inst.get_r1())? as i64;
+                let rhs = self.get_x(hart_id, inst.get_r2())? as i64;
+                let result = if rhs == 0 {
+                    lhs as u64
+                } else if lhs == i64::MIN && rhs == -1 {
+                    0
+                } else {
+                    lhs.wrapping_rem(rhs) as u64
+                };
+                self.set_x(hart_id, inst.get_r0(), result)?;
+                self.next_pc(hart_id)?;
+            }
+            // REMU rd, rs1, rs2 : unsigned. Rem-by-0 => rs1.
+            OpCode::Remu => {
+                let lhs = self.get_x(hart_id, inst.get_r1())?;
+                let rhs = self.get_x(hart_id, inst.get_r2())?;
+                let result = if rhs == 0 { lhs } else { lhs.wrapping_rem(rhs) };
+                self.set_x(hart_id, inst.get_r0(), result)?;
+                self.next_pc(hart_id)?;
+            }
+            // DIVW rd, rs1, rs2 : signed 32-bit, result sign-extended.
+            OpCode::Divw => {
+                let lhs = self.get_x(hart_id, inst.get_r1())? as i32;
+                let rhs = self.get_x(hart_id, inst.get_r2())? as i32;
+                let result = if rhs == 0 {
+                    -1i32 as i64 as u64
+                } else if lhs == i32::MIN && rhs == -1 {
+                    lhs as i64 as u64
+                } else {
+                    lhs.wrapping_div(rhs) as i64 as u64
+                };
+                self.set_x(hart_id, inst.get_r0(), result)?;
+                self.next_pc(hart_id)?;
+            }
+            // DIVUW rd, rs1, rs2 : unsigned 32-bit, result sign-extended.
+            OpCode::Divuw => {
+                let lhs = self.get_x(hart_id, inst.get_r1())? as u32;
+                let rhs = self.get_x(hart_id, inst.get_r2())? as u32;
+                let result = if rhs == 0 { u32::MAX } else { lhs.wrapping_div(rhs) };
+                self.set_x(hart_id, inst.get_r0(), result as i32 as i64 as u64)?;
+                self.next_pc(hart_id)?;
+            }
+            // REMW rd, rs1, rs2 : signed 32-bit, result sign-extended.
+            OpCode::Remw => {
+                let lhs = self.get_x(hart_id, inst.get_r1())? as i32;
+                let rhs = self.get_x(hart_id, inst.get_r2())? as i32;
+                let result = if rhs == 0 {
+                    lhs as i64 as u64
+                } else if lhs == i32::MIN && rhs == -1 {
+                    0
+                } else {
+                    lhs.wrapping_rem(rhs) as i64 as u64
+                };
+                self.set_x(hart_id, inst.get_r0(), result)?;
+                self.next_pc(hart_id)?;
+            }
+            // REMUW rd, rs1, rs2 : unsigned 32-bit, result sign-extended.
+            OpCode::Remuw => {
+                let lhs = self.get_x(hart_id, inst.get_r1())? as u32;
+                let rhs = self.get_x(hart_id, inst.get_r2())? as u32;
+                let result = if rhs == 0 { lhs } else { lhs.wrapping_rem(rhs) };
+                self.set_x(hart_id, inst.get_r0(), result as i32 as i64 as u64)?;
+                self.next_pc(hart_id)?;
+            }
+            // ============================================================
+            // Zbc: carry-less multiplication
+            // ============================================================
+            // CLMUL rd, rs1, rs2 : low 64 bits of carry-less product.
+            OpCode::Clmul => {
+                let lhs = self.get_x(hart_id, inst.get_r1())?;
+                let rhs = self.get_x(hart_id, inst.get_r2())?;
+                let mut result: u64 = 0;
+                for i in 0..64u32 {
+                    if (rhs >> i) & 1 == 1 {
+                        result ^= lhs.wrapping_shl(i);
+                    }
+                }
+                self.set_x(hart_id, inst.get_r0(), result)?;
+                self.next_pc(hart_id)?;
+            }
+            // CLMULH rd, rs1, rs2 : high 64 bits of carry-less product.
+            OpCode::Clmulh => {
+                let lhs = self.get_x(hart_id, inst.get_r1())?;
+                let rhs = self.get_x(hart_id, inst.get_r2())?;
+                let mut result: u64 = 0;
+                for i in 1..64u32 {
+                    if (rhs >> i) & 1 == 1 {
+                        result ^= lhs.wrapping_shr(64 - i);
+                    }
+                }
+                self.set_x(hart_id, inst.get_r0(), result)?;
+                self.next_pc(hart_id)?;
+            }
+            // CLMULR rd, rs1, rs2 : reversed carry-less product.
+            OpCode::Clmulr => {
+                let lhs = self.get_x(hart_id, inst.get_r1())?;
+                let rhs = self.get_x(hart_id, inst.get_r2())?;
+                let mut result: u64 = 0;
+                for i in 0..64u32 {
+                    if (rhs >> i) & 1 == 1 {
+                        result ^= lhs.wrapping_shr(63 - i);
+                    }
+                }
+                self.set_x(hart_id, inst.get_r0(), result)?;
+                self.next_pc(hart_id)?;
+            }
+            // ============================================================
+            // Zicond: conditional zero
+            // ============================================================
+            // CZERO.EQZ rd, rs1, rs2 : rd = (rs2 == 0) ? 0 : rs1
+            OpCode::Czeroeqz => {
+                let rs1 = self.get_x(hart_id, inst.get_r1())?;
+                let rs2 = self.get_x(hart_id, inst.get_r2())?;
+                self.set_x(hart_id, inst.get_r0(), if rs2 == 0 { 0 } else { rs1 })?;
+                self.next_pc(hart_id)?;
+            }
+            // CZERO.NEZ rd, rs1, rs2 : rd = (rs2 != 0) ? 0 : rs1
+            OpCode::Czeronez => {
+                let rs1 = self.get_x(hart_id, inst.get_r1())?;
+                let rs2 = self.get_x(hart_id, inst.get_r2())?;
+                self.set_x(hart_id, inst.get_r0(), if rs2 != 0 { 0 } else { rs1 })?;
                 self.next_pc(hart_id)?;
             }
             _ => {
@@ -4003,16 +4483,22 @@ impl Machine {
         }
     }
 
-    /// Read a CSR register by its address (delegates to Hart)
+    /// Read a CSR register by its address (delegates to Hart).
+    ///
+    /// Returns `0` for invalid hart IDs instead of panicking.
     fn read_csr(&self, hart_id: HartId, addr: u64) -> u64 {
-        let hart = self.get_hart(hart_id).unwrap();
-        hart.read_csr(addr)
+        self.get_hart(hart_id)
+            .map(|hart| hart.read_csr(addr))
+            .unwrap_or(0)
     }
 
-    /// Write a value to a CSR register by its address (delegates to Hart)
+    /// Write a value to a CSR register by its address (delegates to Hart).
+    ///
+    /// Silently ignores invalid hart IDs instead of panicking.
     fn write_csr(&mut self, hart_id: HartId, addr: u64, value: u64) {
-        let hart = self.get_hart_mut(hart_id).unwrap();
-        hart.write_csr(addr, value);
+        if let Some(hart) = self.get_hart_mut(hart_id) {
+            hart.write_csr(addr, value);
+        }
     }
 }
 

@@ -7,12 +7,6 @@ use crate::utility::*;
 mod machine;
 #[path = "../src/memory/mod.rs"]
 mod memory;
-#[path = "../src/vm/mod.rs"]
-mod vm;
-#[path = "../src/trace/mod.rs"]
-mod trace;
-#[path = "../src/debug/mod.rs"]
-mod debug;
 #[path = "../src/debugger_error.rs"]
 mod debugger_error;
 
@@ -377,7 +371,7 @@ main:
     let mut m = setup_machine(asm);
     let test_addr: u64 = 0x1000;
     set_reg(&mut m, "t1", test_addr);
-    m.memory.write_u8(test_addr, 0xFF);
+    m.processors[0].memory.write_u8(test_addr, 0xFF);
     step(&mut m);
     assert_eq!(get_reg(&m, "t0"), u64::MAX); // sign-extended to -1
 }
@@ -392,7 +386,7 @@ main:
     let mut m = setup_machine(asm);
     let test_addr: u64 = 0x1000;
     set_reg(&mut m, "t1", test_addr);
-    m.memory.write_u8(test_addr, 0x7F);
+    m.processors[0].memory.write_u8(test_addr, 0x7F);
     step(&mut m);
     assert_eq!(get_reg(&m, "t0"), 127);
 }
@@ -407,7 +401,7 @@ main:
     let mut m = setup_machine(asm);
     let test_addr: u64 = 0x1000;
     set_reg(&mut m, "t1", test_addr);
-    m.memory.write_u8(test_addr, 0xFF);
+    m.processors[0].memory.write_u8(test_addr, 0xFF);
     step(&mut m);
     assert_eq!(get_reg(&m, "t0"), 255);
 }
@@ -422,7 +416,7 @@ main:
     let mut m = setup_machine(asm);
     let test_addr: u64 = 0x1000;
     set_reg(&mut m, "t1", test_addr);
-    m.memory.write_u16(test_addr, 0xFFFF);
+    m.processors[0].memory.write_u16(test_addr, 0xFFFF);
     step(&mut m);
     assert_eq!(get_reg(&m, "t0"), u64::MAX);
 }
@@ -437,7 +431,7 @@ main:
     let mut m = setup_machine(asm);
     let test_addr: u64 = 0x1000;
     set_reg(&mut m, "t1", test_addr);
-    m.memory.write_u16(test_addr, 0x7FFF);
+    m.processors[0].memory.write_u16(test_addr, 0x7FFF);
     step(&mut m);
     assert_eq!(get_reg(&m, "t0"), 32767);
 }
@@ -452,7 +446,7 @@ main:
     let mut m = setup_machine(asm);
     let test_addr: u64 = 0x1000;
     set_reg(&mut m, "t1", test_addr);
-    m.memory.write_u16(test_addr, 0xFFFF);
+    m.processors[0].memory.write_u16(test_addr, 0xFFFF);
     step(&mut m);
     assert_eq!(get_reg(&m, "t0"), 65535);
 }
@@ -467,7 +461,7 @@ main:
     let mut m = setup_machine(asm);
     let test_addr: u64 = 0x1000;
     set_reg(&mut m, "t1", test_addr);
-    m.memory.write_u32(test_addr, 0xFFFFFFFF);
+    m.processors[0].memory.write_u32(test_addr, 0xFFFFFFFF);
     step(&mut m);
     assert_eq!(get_reg(&m, "t0"), u64::MAX);
 }
@@ -482,7 +476,7 @@ main:
     let mut m = setup_machine(asm);
     let test_addr: u64 = 0x1000;
     set_reg(&mut m, "t1", test_addr);
-    m.memory.write_u32(test_addr, 0x7FFFFFFF);
+    m.processors[0].memory.write_u32(test_addr, 0x7FFFFFFF);
     step(&mut m);
     assert_eq!(get_reg(&m, "t0"), 2147483647);
 }
@@ -497,7 +491,7 @@ main:
     let mut m = setup_machine(asm);
     let test_addr: u64 = 0x1000;
     set_reg(&mut m, "t1", test_addr);
-    m.memory.write_u32(test_addr, 0xFFFFFFFF);
+    m.processors[0].memory.write_u32(test_addr, 0xFFFFFFFF);
     step(&mut m);
     assert_eq!(get_reg(&m, "t0"), 0xFFFFFFFF);
 }
@@ -512,7 +506,7 @@ main:
     let mut m = setup_machine(asm);
     let test_addr: u64 = 0x1000;
     set_reg(&mut m, "t1", test_addr);
-    m.memory.write_u64(test_addr, 0x0123456789ABCDEF);
+    m.processors[0].memory.write_u64(test_addr, 0x0123456789ABCDEF);
     step(&mut m);
     assert_eq!(get_reg(&m, "t0"), 0x0123456789ABCDEF);
 }
@@ -527,7 +521,7 @@ main:
     let mut m = setup_machine(asm);
     let test_addr: u64 = 0x1000;
     set_reg(&mut m, "t1", test_addr);
-    m.memory.write_u8(test_addr + 4, 0x42);
+    m.processors[0].memory.write_u8(test_addr + 4, 0x42);
     step(&mut m);
     assert_eq!(get_reg(&m, "t0"), 0x42);
 }
@@ -548,7 +542,7 @@ main:
     set_reg(&mut m, "t1", test_addr);
     set_reg(&mut m, "t0", 0xAB);
     step(&mut m);
-    assert_eq!(m.memory.read_u8(test_addr).unwrap_or_default(), 0xAB);
+    assert_eq!(m.processors[0].memory.read_u8(test_addr).unwrap_or_default(), 0xAB);
 }
 
 #[test]
@@ -563,7 +557,7 @@ main:
     set_reg(&mut m, "t1", test_addr);
     set_reg(&mut m, "t0", 0xABCD);
     step(&mut m);
-    assert_eq!(m.memory.read_u16(test_addr).unwrap_or_default(), 0xABCD);
+    assert_eq!(m.processors[0].memory.read_u16(test_addr).unwrap_or_default(), 0xABCD);
 }
 
 #[test]
@@ -578,7 +572,7 @@ main:
     set_reg(&mut m, "t1", test_addr);
     set_reg(&mut m, "t0", 0xDEADBEEF);
     step(&mut m);
-    assert_eq!(m.memory.read_u32(test_addr).unwrap_or_default(), 0xDEADBEEF);
+    assert_eq!(m.processors[0].memory.read_u32(test_addr).unwrap_or_default(), 0xDEADBEEF);
 }
 
 #[test]
@@ -593,7 +587,7 @@ main:
     set_reg(&mut m, "t1", test_addr);
     set_reg(&mut m, "t0", 0x0123456789ABCDEF);
     step(&mut m);
-    assert_eq!(m.memory.read_u64(test_addr).unwrap_or_default(), 0x0123456789ABCDEF);
+    assert_eq!(m.processors[0].memory.read_u64(test_addr).unwrap_or_default(), 0x0123456789ABCDEF);
 }
 
 #[test]
@@ -608,7 +602,7 @@ main:
     set_reg(&mut m, "t1", test_addr);
     set_reg(&mut m, "t0", 0x42);
     step(&mut m);
-    assert_eq!(m.memory.read_u8(test_addr + 8).unwrap_or_default(), 0x42);
+    assert_eq!(m.processors[0].memory.read_u8(test_addr + 8).unwrap_or_default(), 0x42);
 }
 
 // ============================================================
@@ -1153,7 +1147,7 @@ main:
     let mut m = setup_machine(asm);
     let test_addr: u64 = 0x1000;
     set_reg(&mut m, "t1", test_addr);
-    m.memory.write_u32(test_addr, 0x7FFFFFFF);
+    m.processors[0].memory.write_u32(test_addr, 0x7FFFFFFF);
     step(&mut m);
     assert_eq!(get_reg(&m, "t0"), 2147483647);
 }
@@ -1173,7 +1167,7 @@ main:
     set_reg(&mut m, "t0", test_addr);   // r0=base
     set_reg(&mut m, "t1", 0xDEADBEEF);  // r1=value
     step(&mut m);
-    assert_eq!(m.memory.read_u32(test_addr).unwrap_or_default(), 0xDEADBEEF);
+    assert_eq!(m.processors[0].memory.read_u32(test_addr).unwrap_or_default(), 0xDEADBEEF);
 }
 
 #[test]
@@ -1187,7 +1181,7 @@ main:
     let mut m = setup_machine(asm);
     let test_addr: u64 = 0x1000;
     set_reg(&mut m, "t1", test_addr);
-    m.memory.write_u64(test_addr, 0x0123456789ABCDEF);
+    m.processors[0].memory.write_u64(test_addr, 0x0123456789ABCDEF);
     step(&mut m);
     assert_eq!(get_reg(&m, "t0"), 0x0123456789ABCDEF);
 }
@@ -1207,7 +1201,7 @@ main:
     set_reg(&mut m, "t0", test_addr);                 // r0=base
     set_reg(&mut m, "t1", 0x0123456789ABCDEF);        // r1=value
     step(&mut m);
-    assert_eq!(m.memory.read_u64(test_addr).unwrap_or_default(), 0x0123456789ABCDEF);
+    assert_eq!(m.processors[0].memory.read_u64(test_addr).unwrap_or_default(), 0x0123456789ABCDEF);
 }
 
 #[test]
@@ -1221,7 +1215,7 @@ main:
     let mut m = setup_machine(asm);
     // Set sp (x2) to 0x1000
     m.get_default_hart_mut().unwrap().x.regs[2].value = 0x1000;
-    m.memory.write_u32(0x1004, 0x12345678);
+    m.processors[0].memory.write_u32(0x1004, 0x12345678);
     step(&mut m);
     assert_eq!(get_reg(&m, "t0"), 0x12345678);
 }
@@ -1238,7 +1232,7 @@ main:
     m.get_default_hart_mut().unwrap().x.regs[2].value = 0x1000;
     set_reg(&mut m, "t0", 0xDEADBEEF);
     step(&mut m);
-    assert_eq!(m.memory.read_u32(0x1004).unwrap_or_default(), 0xDEADBEEF);
+    assert_eq!(m.processors[0].memory.read_u32(0x1004).unwrap_or_default(), 0xDEADBEEF);
 }
 
 #[test]
@@ -1251,7 +1245,7 @@ main:
 "#;
     let mut m = setup_machine(asm);
     m.get_default_hart_mut().unwrap().x.regs[2].value = 0x1000;
-    m.memory.write_u64(0x1008, 0x0123456789ABCDEF);
+    m.processors[0].memory.write_u64(0x1008, 0x0123456789ABCDEF);
     step(&mut m);
     assert_eq!(get_reg(&m, "t0"), 0x0123456789ABCDEF);
 }
@@ -1268,5 +1262,5 @@ main:
     m.get_default_hart_mut().unwrap().x.regs[2].value = 0x1000;
     set_reg(&mut m, "t0", 0x0123456789ABCDEF);
     step(&mut m);
-    assert_eq!(m.memory.read_u64(0x1008).unwrap_or_default(), 0x0123456789ABCDEF);
+    assert_eq!(m.processors[0].memory.read_u64(0x1008).unwrap_or_default(), 0x0123456789ABCDEF);
 }

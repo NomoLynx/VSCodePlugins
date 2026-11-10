@@ -4,17 +4,22 @@ pub struct LSPLocation {
     pub(crate) character: u32,
 }
 
-/// implement operator - for LSPLocation
-/// the result is the delta between two locations, which is used for semantic tokens
+/// Implements `Sub` for [`LSPLocation`].
+///
+/// The result is the delta between two locations, used for LSP semantic-token
+/// delta encoding.  Uses [`saturating_sub`] to avoid panics on out-of-order
+/// positions (defensive: callers should pass monotonically increasing locations).
 impl std::ops::Sub for LSPLocation {
     type Output = Self;
 
     fn sub(self, other: Self) -> Self {
-        
         Self {
-            line: self.line - other.line,
-            character: if self.line == other.line { self.character - other.character } 
-                       else { self.character },
+            line: self.line.saturating_sub(other.line),
+            character: if self.line == other.line {
+                self.character.saturating_sub(other.character)
+            } else {
+                self.character
+            },
         }
     }
 }

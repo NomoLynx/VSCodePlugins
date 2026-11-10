@@ -7,12 +7,6 @@ use crate::utility::*;
 mod machine;
 #[path = "../src/memory/mod.rs"]
 mod memory;
-#[path = "../src/vm/mod.rs"]
-mod vm;
-#[path = "../src/trace/mod.rs"]
-mod trace;
-#[path = "../src/debug/mod.rs"]
-mod debug;
 #[path = "../src/debugger_error.rs"]
 mod debugger_error;
 
@@ -1934,7 +1928,7 @@ main:
     // Use memory directly
     let val = 3.14159265358979f64;
     let bits = val.to_bits();
-    m.memory.write_u64(test_addr, bits);
+    m.processors[0].memory.write_u64(test_addr, bits);
     step(&mut m);
     assert!((get_freg(&m, "f0") - val).abs() < 0.0001);
 }
@@ -1951,7 +1945,7 @@ main:
     set_reg(&mut m, "t1", test_addr);
     set_freg(&mut m, "f0", 3.14159265358979);
     step(&mut m);
-    let result_bits = m.memory.read_u64(test_addr).unwrap_or_default();
+    let result_bits = m.processors[0].memory.read_u64(test_addr).unwrap_or_default();
     let result = f64::from_bits(result_bits);
     assert!((result - 3.14159265358979).abs() < 0.0001);
 }
@@ -2147,7 +2141,7 @@ main:
     set_reg(&mut m, "t1", test_addr);
     let val = 3.14f32;
     let bits = val.to_bits();
-    m.memory.write_u32(test_addr, bits);
+    m.processors[0].memory.write_u32(test_addr, bits);
     step(&mut m);
     assert!((get_freg(&m, "f0") - 3.14).abs() < 0.001);
 }
@@ -2165,7 +2159,7 @@ main:
     set_reg(&mut m, "t1", test_addr);
     set_freg(&mut m, "f0", 3.14f32 as f64);
     step(&mut m);
-    let result_bits = m.memory.read_u32(test_addr).unwrap_or_default();
+    let result_bits = m.processors[0].memory.read_u32(test_addr).unwrap_or_default();
     let result = f32::from_bits(result_bits);
     assert!((result - 3.14f32).abs() < 0.001);
 }
