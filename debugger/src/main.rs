@@ -18,6 +18,7 @@ use log4rs::{
 };
 
 use dap::prelude::*;
+use dap::errors::ServerError;
 use dap::events::*;
 use dap::responses::*;
 use dap::types;
@@ -133,6 +134,22 @@ fn thread_id_to_hart_id(thread_id: i64) -> u64 {
     }
 }
 
+/// Whether a `poll_request` failure leaves the DAP input stream in a
+/// consistent position (the offending message or header line was already
+/// consumed). Such errors must NOT abort the debug session — log and keep
+/// serving — otherwise a single malformed client message kills the session
+/// without `Exited`/`Terminated` events. `IoError` is excluded: the stream
+/// itself is broken and no forward progress is possible.
+fn is_recoverable_poll_error(err: &ServerError) -> bool {
+    match err {
+        ServerError::ParseError(_)
+        | ServerError::HeaderParseError { .. }
+        | ServerError::UnknownHeader { .. }
+        | ServerError::ProtocolError { .. } => true,
+        _ => false,
+    }
+}
+
 /// Encode a hart_id into a variables_reference for a given scope base.
 /// Scope bases are spaced [`VREF_SPACING`] apart; the hart_id is added as an
 /// offset. This requires `hart_id < VREF_SPACING` — a larger value would
@@ -209,12 +226,11 @@ const INT_REG_NAMES: [&str; 32] = [
 fn init_debugger_logger(log_file: &str) {
     // Try to initialize file-based logger; fall back to silent if anything fails.
     // Don't unwrap — logging failure must not crash the debugger.
+    let encoder = Box::new(PatternEncoder::new(
+        "{d(%Y-%m-%d %H:%M:%S)} [{l}] {m}{n}",
+    )) as Box<dyn log4rs::encode::Encode>;
     let logfile = match FileAppender::builder()
-        .encoder(Box::new(
-            PatternEncoder::new(
-                "{d(%Y-%m-%d %H:%M:%S)} [{l}] {m}{n}"
-            )
-        ))
+        .encoder(encoder)
         .build(log_file)
     {
         Ok(f) => f,
@@ -224,10 +240,11 @@ fn init_debugger_logger(log_file: &str) {
         }
     };
 
+    let appender = Box::new(logfile) as Box<dyn log4rs::append::Append>;
     let config = match Config::builder()
         .appender(
             Appender::builder()
-                .build("file", Box::new(logfile))
+                .build("file", appender)
         )
         .build(
             Root::builder()
@@ -275,10 +292,67 @@ fn get_log_file() -> String {
     fallback.to_string_lossy().to_string()
 }
 
+/// B4: Resolve where the register dump is written at session end.
+///
+/// Priority (highest first): explicit `dumpRegistersOutput` from launch.json,
+/// then the program's own directory, then the process cwd.  An explicit value
+/// ending in `.txt` is used as a complete file path; anything else is treated
+/// as a directory and gets `{program file name}.registers.txt` inside it.
+fn resolve_dump_target(explicit: Option<&str>, program_path: Option<&str>) -> Option<PathBuf> {
+    let file_name = program_path
+        .and_then(|p| std::path::Path::new(p).file_name())
+        .map(|n| format!("{}.registers.txt", n.to_string_lossy()))
+        .unwrap_or_else(|| "registers.txt".to_string());
+
+    if let Some(value) = explicit {
+        let p = PathBuf::from(value);
+        let is_file = p
+            .extension()
+            .map(|e| e.eq_ignore_ascii_case("txt"))
+            .unwrap_or(false);
+        return Some(if is_file { p } else { p.join(&file_name) });
+    }
+    if let Some(dir) = program_path.and_then(|p| std::path::Path::new(p).parent()) {
+        return Some(dir.join(&file_name));
+    }
+    env::current_dir().ok().map(|d| d.join(&file_name))
+}
+
+/// B3: End the debug session — one-shot register dump (failures only logged),
+/// then `Exited` + `Terminated`.
+///
+/// Every natural-termination path (exit syscall, ran off the end, execution
+/// error) funnels through here so the dump is written exactly once, right
+/// before `Terminated`.  User-initiated stops pass `do_dump = false` (B6).
+fn end_session<R: std::io::Read, W: std::io::Write>(
+    server: &mut Server<R, W>,
+    machine: Option<&Machine>,
+    dump_target: &Option<PathBuf>,
+    program_name: &str,
+    exit_code: i64,
+    do_dump: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if do_dump {
+        if let (Some(m), Some(target)) = (machine, dump_target.as_ref()) {
+            match m.dump_registers(target, program_name) {
+                Ok(()) => log::info!("register dump written to {}", target.display()),
+                Err(e) => {
+                    log::error!("failed to write register dump to {}: {}", target.display(), e)
+                }
+            }
+        }
+    }
+    server.send_event(Event::Exited(ExitedEventBody { exit_code }))?;
+    server.send_event(Event::Terminated(None))?;
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // program_path used for stack trace source reference, set during launch request
-    let mut program_path: Option<String> = None; 
+    let mut program_path: Option<String> = None;
+    // B4: register dump target resolved at launch; written at session end.
+    let mut dump_target: Option<PathBuf> = None;
     let mut machine: Option<Machine> = None;
     let mut current_line: usize = 1;
     let mut offset_to_line_map: OffsetToLineMap = HashMap::new();
@@ -320,9 +394,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("debugger started");
 
     loop {
-        let req = match server.poll_request()? {
-            Some(req) => req,
-            None => break,
+        let req = match server.poll_request() {
+            Ok(Some(req)) => req,
+            Ok(None) => break,
+            Err(e) if is_recoverable_poll_error(&e) => {
+                log::warn!("ignoring unparseable DAP request: {:?}", e);
+                continue;
+            }
+            Err(e) => return Err(e.into()),
         };
 
         log::info!("received request: {:?}", req.command);
@@ -431,6 +510,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .map(|n| n.max(1) as usize)
                         .unwrap_or(1);
                 log::info!("num_processors: {}", num_processors);
+
+                // B4: register dump output (explicit config > program dir > cwd)
+                dump_target = resolve_dump_target(
+                    args.additional_data
+                        .as_ref()
+                        .and_then(|v| v["dumpRegistersOutput"].as_str()),
+                    program_path.as_deref(),
+                );
+                log::info!("register dump target: {:?}", dump_target);
 
                 // P0-3: Reset frame→hart mappings on new session.
                 frame_to_hart.clear();
@@ -581,11 +669,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }))?;
                     }
                     server.respond(req.success(ResponseBody::StepIn))?;
-                    // P0-4: Report non-zero exit code on execution error so
-                    // automation/scripts can distinguish crash from normal exit.
-                    let exit_code = if matches!(outcome, StepOutcome::Error(_)) { 1 } else { 0 };
-                    server.send_event(Event::Exited(ExitedEventBody { exit_code }))?;
-                    server.send_event(Event::Terminated(None))?;
+                    // B3/B5: session exit code + one-shot register dump before
+                    // Terminated. Covers natural end (exit syscall / ran off the
+                    // end) and execution errors alike.
+                    let exit_code = machine.as_ref().map(|m| m.session_exit_code()).unwrap_or(1);
+                    end_session(
+                        &mut server,
+                        machine.as_ref(),
+                        &dump_target,
+                        program_path.as_deref().unwrap_or("unknown"),
+                        exit_code,
+                        true,
+                    )?;
                     break;
                 }
 
@@ -633,11 +728,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }))?;
                     }
                     server.respond(req.success(ResponseBody::Next))?;
-                    // P0-4: Report non-zero exit code on execution error so
-                    // automation/scripts can distinguish crash from normal exit.
-                    let exit_code = if matches!(outcome, StepOutcome::Error(_)) { 1 } else { 0 };
-                    server.send_event(Event::Exited(ExitedEventBody { exit_code }))?;
-                    server.send_event(Event::Terminated(None))?;
+                    // B3/B5: session exit code + one-shot register dump before
+                    // Terminated. Covers natural end (exit syscall / ran off the
+                    // end) and execution errors alike.
+                    let exit_code = machine.as_ref().map(|m| m.session_exit_code()).unwrap_or(1);
+                    end_session(
+                        &mut server,
+                        machine.as_ref(),
+                        &dump_target,
+                        program_path.as_deref().unwrap_or("unknown"),
+                        exit_code,
+                        true,
+                    )?;
                     break;
                 }
 
@@ -675,6 +777,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 frame_to_hart.clear();
 
                 let mut should_terminate = false;
+                // B6: distinguish user-initiated stops (Terminate/Disconnect/
+                // stream closed) from natural program end — only the latter
+                // writes the register dump.
+                let mut terminated_by_user = false;
                 let mut had_execution_error = false;
                 let mut hit_breakpoint = false;
                 let mut hit_bp_ids: Vec<i64> = Vec::new();
@@ -995,7 +1101,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 // simulation loop resumes automatically.
                                 if steps % DAP_POLL_INTERVAL == 0 && stdin_has_data() {
                                     log::info!("continue: DAP data pending at step {}, processing", steps);
-                                    match server.poll_request()? {
+                                    let poll_result = server.poll_request();
+                                    if let Err(e) = &poll_result {
+                                        if is_recoverable_poll_error(e) {
+                                            // Malformed request: the offending
+                                            // message is already consumed — log
+                                            // and keep executing instead of
+                                            // aborting the session without
+                                            // Exited/Terminated.
+                                            log::warn!(
+                                                "continue: ignoring unparseable DAP request: {:?}",
+                                                e
+                                            );
+                                            continue;
+                                        }
+                                        // Stream-level failure: same handling as
+                                        // the stream-closed case below (B6).
+                                        log::error!("continue: DAP input stream error, stopping: {:?}", e);
+                                        should_terminate = true;
+                                        terminated_by_user = true;
+                                        break;
+                                    }
+                                    match poll_result? {
                                         Some(pending_req) => {
                                             match &pending_req.command {
                                                 Command::Pause(_) => {
@@ -1022,12 +1149,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     log::info!("continue: Terminate received");
                                                     server.respond(pending_req.success(ResponseBody::Terminate))?;
                                                     should_terminate = true;
+                                                    terminated_by_user = true;
                                                     break;
                                                 }
                                                 Command::Disconnect(_) => {
                                                     log::info!("continue: Disconnect received");
                                                     server.respond(pending_req.success(ResponseBody::Disconnect))?;
                                                     should_terminate = true;
+                                                    terminated_by_user = true;
                                                     break;
                                                 }
                                                 Command::Threads => {
@@ -1345,8 +1474,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                         }
                                         None => {
-                                            // Stream closed — terminate
+                                            // Stream closed — treat as an
+                                            // external stop, so no dump (B6).
                                             should_terminate = true;
+                                            terminated_by_user = true;
                                             break;
                                         }
                                     }
@@ -1397,11 +1528,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Post-loop event handling (DAP async: Continue was
                         // already responded to above — we only send events here).
                         if should_terminate {
-                            // P0-4: Non-zero exit code on execution error so
-                            // automation/scripts can distinguish crash from normal exit.
-                            let exit_code = if had_execution_error { 1 } else { 0 };
-                            server.send_event(Event::Exited(ExitedEventBody { exit_code }))?;
-                            server.send_event(Event::Terminated(None))?;
+                            // B3/B5/B6: one-shot register dump before Terminated
+                            // (skipped for user-initiated stops), exit code from
+                            // per-hart end states (error wins, then first non-zero
+                            // exit code by hart order, else 0).
+                            let exit_code = if terminated_by_user {
+                                1
+                            } else {
+                                machine.as_ref().map(|m| m.session_exit_code()).unwrap_or(1)
+                            };
+                            end_session(
+                                &mut server,
+                                machine.as_ref(),
+                                &dump_target,
+                                program_path.as_deref().unwrap_or("unknown"),
+                                exit_code,
+                                !terminated_by_user,
+                            )?;
                             break;
                         } else if !paused_by_user {
                             // Breakpoint hit or step limit reached
@@ -1941,6 +2084,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 hart.state = HartState::Running;
                                 hart.finish_clock = None;
                                 hart.error_info = None;
+                                hart.exit_code = None;
                             }
                             // Look up source line for the display
                             if let Some(line) = offset_to_line_map
@@ -2165,13 +2309,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Command::Terminate(_) => {
                 log::info!("terminate");
                 server.respond(req.success(ResponseBody::Terminate))?;
-                // Non-zero exit code so automation/scripts can
-                // distinguish user-initiated termination (1) from
-                // normal exit (0) and execution errors.
-                server.send_event(Event::Exited(ExitedEventBody {
-                    exit_code: 1,
-                }))?;
-                server.send_event(Event::Terminated(None))?;
+                // B6: user-initiated stop — exit code 1, no register dump.
+                end_session(
+                    &mut server,
+                    machine.as_ref(),
+                    &dump_target,
+                    program_path.as_deref().unwrap_or("unknown"),
+                    1,
+                    false,
+                )?;
                 break;
             }
             Command::ConfigurationDone => {
@@ -2268,6 +2414,32 @@ fn do_single_step(
                         hart.x.read(6), hart.x.read(7), hart.x.read(5),
                         hart.x.read(10), hart.x.read(11), hart.x.read(12),
                         hart.pc);
+                    // B1: A hart that reached Finished during this step (exit
+                    // syscall, or stop recorded by machine.rs) must end the step
+                    // flow even though PC is still on a valid instruction — the
+                    // `exit` syscall intentionally leaves PC in place, so the
+                    // PC-range check below cannot see it.
+                    //
+                    // B2: With multiple harts only the session ends when *all*
+                    // harts are Finished; otherwise this hart is done and the
+                    // session stays alive so the remaining harts can continue.
+                    if matches!(hart.state, HartState::Finished) {
+                        let all_finished = m
+                            .get_all_harts()
+                            .iter()
+                            .all(|(_, h)| matches!(h.state, HartState::Finished));
+                        if all_finished {
+                            return if let Some(err) = hart.error_info.clone() {
+                                StepOutcome::Error(err)
+                            } else {
+                                StepOutcome::Terminated
+                            };
+                        }
+                        log::info!(
+                            "hart {} finished but other harts still running",
+                            hart_id
+                        );
+                    }
                     // Use instruction cache to check if PC is valid, not offset_to_line.
                     // offset_to_line only contains instructions with debug line info,
                     // so instructions without name_location would be incorrectly
