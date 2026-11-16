@@ -408,6 +408,8 @@ pub struct HartPerformance {
     /// Frozen while this hart is not taking part (stop-the-world stepping) and
     /// once it reaches `Finished`.
     pub(crate) runtime_cycles: u64,
+    /// Exit code if this hart ended via the exit syscall, `None` otherwise.
+    pub(crate) exit_code: Option<i64>,
 }
 
 impl HartPerformance {
@@ -518,6 +520,11 @@ pub struct Hart {
     /// memory access fault, etc.), this holds the error description.
     /// `None` means normal termination (PC past end of text) or still running.
     pub(crate) error_info: Option<String>,
+    /// Exit code captured when this hart ended via the exit syscall (`ecall`
+    /// with `a7 = 93`, or `a7 = 94` where the calling hart's `a0` is used).
+    /// `None` for harts that never called exit (ran off the end of text,
+    /// execution error, or terminated by `exit_group` without their own code).
+    pub(crate) exit_code: Option<i64>,
     /// Atomic reservation address (LR/SC), if any.
     pub(crate) reservation: Option<u64>,
     /// Current privilege level (defaults to Machine mode).
@@ -546,6 +553,7 @@ impl Hart {
             state: HartState::Running,
             finish_clock: None,
             error_info: None,
+            exit_code: None,
         }
     }
 
@@ -888,6 +896,7 @@ impl Default for Hart {
             state: HartState::Running,
             finish_clock: None,
             error_info: None,
+            exit_code: None,
         }
     }
 }

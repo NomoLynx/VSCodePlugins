@@ -12,6 +12,8 @@ use crate::machine::register_ref::{RegisterRef, RegisterType};
 use crate::memory::memory::Memory;
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
+use std::path::Path;
 
 // ============================================================
 // AES S-Box and helper tables for RISC-V krypto instructions
@@ -511,6 +513,7 @@ impl Machine {
             exec_cycles: hart.exec_cycles,
             inst_count: hart.inst_count,
             runtime_cycles,
+            exit_code: hart.exit_code,
         })
     }
 
@@ -529,10 +532,203 @@ impl Machine {
                     exec_cycles: hart.exec_cycles,
                     inst_count: hart.inst_count,
                     runtime_cycles,
+                    exit_code: hart.exit_code,
                 });
             }
         }
         result
+    }
+
+    /// Dump every hart's registers to `output` as a plain-text report.
+    ///
+    /// Layout: one `## Processor N` section per processor and one `### Hart M`
+    /// section per hart (state, PC, general/float registers, core CSRs).
+    ///
+    /// Float registers are printed **mechanically** — raw 64-bit pattern,
+    /// low-32 read as f32, full-64 read as f64, plus a NaN-box tag — so the
+    /// dump never hides the encoding.  This intentionally differs from the DAP
+    /// variables view, which shows the *semantic* interpretation (NaN-boxed
+    /// value as f32, otherwise f64).
+    pub fn dump_registers(&self, output: &Path, program_name: &str) -> std::io::Result<()> {
+        // ABI names, x0-x31. Same table the DAP layer uses for display.
+        const X_ABI: [&str; 32] = [
+            "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0/fp", "s1", "a0", "a1", "a2",
+            "a3", "a4", "a5", "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10",
+            "s11", "t3", "t4", "t5", "t6",
+        ];
+
+        let mut buf = String::new();
+        let _ = writeln!(buf, "# Register Dump");
+        let _ = writeln!(buf, "Program: {}", program_name);
+        if let Ok(since_epoch) =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        {
+            let _ = writeln!(buf, "Timestamp: {} (unix seconds)", since_epoch.as_secs());
+        }
+        let _ = writeln!(buf);
+
+        for (proc_idx, processor) in self.processors.iter().enumerate() {
+            let _ = writeln!(buf, "## Processor {}", proc_idx);
+            let _ = writeln!(buf);
+            for hart in &processor.harts {
+                let _ = writeln!(buf, "### Hart {}", hart.id);
+                let state_desc = match (&hart.state, &hart.error_info, hart.exit_code) {
+                    (HartState::Finished, Some(err), _) => format!("Finished (error: {})", err),
+                    (HartState::Finished, None, Some(code)) => {
+                        format!("Finished (exit code: {})", code)
+                    }
+                    (HartState::Finished, None, None) => "Finished".to_string(),
+                    (HartState::Running, _, _) => "Running".to_string(),
+                    (HartState::Halted, _, _) => "Halted".to_string(),
+                };
+                let _ = writeln!(buf, "State: {}", state_desc);
+                let _ = writeln!(buf, "PC: 0x{:016x}", hart.pc);
+                let _ = writeln!(buf);
+
+                let _ = writeln!(buf, "#### General Registers");
+                for i in 0..32 {
+                    let _ = writeln!(
+                        buf,
+                        "x{:<2} / {:<6} 0x{:016x}",
+                        i,
+                        X_ABI[i],
+                        hart.x.read(i)
+                    );
+                }
+                let _ = writeln!(buf);
+
+                let _ = writeln!(buf, "#### Float Registers");
+                let _ = writeln!(
+                    buf,
+                    "(mechanical view: raw | low32 as f32 | full64 as f64 | encoding)"
+                );
+                for i in 0..32 {
+                    let bits = hart.f.read(i);
+                    let f32_str = format!("{:.6}", f32::from_bits(bits as u32));
+                    let f64_str = format!("{:.6}", f64::from_bits(bits));
+                    let encoding = if (bits >> 32) == 0xFFFFFFFF {
+                        "NaN-boxed f32"
+                    } else {
+                        "plain f64"
+                    };
+                    let _ = writeln!(
+                        buf,
+                        "f{:<2} 0x{:016x} | {:>12} | {:>16} | {}",
+                        i, bits, f32_str, f64_str, encoding
+                    );
+                }
+                let _ = writeln!(buf);
+
+                let _ = writeln!(buf, "#### Core CSRs");
+                let _ = writeln!(buf, "mstatus  0x{:016x}", hart.read_csr(0x300));
+                let _ = writeln!(buf, "mcause   0x{:016x}", hart.read_csr(0x342));
+                let _ = writeln!(buf, "mtval    0x{:016x}", hart.read_csr(0x343));
+                let _ = writeln!(buf, "mepc     0x{:016x}", hart.read_csr(0x341));
+                let _ = writeln!(buf, "mhartid  0x{:016x}", hart.read_csr(0xF14));
+                let _ = writeln!(buf, "mcycle   0x{:016x}", hart.read_csr(0xB00));
+                let _ = writeln!(buf, "minstret 0x{:016x}", hart.read_csr(0xB02));
+                let _ = writeln!(buf);
+
+                // Always include the FULL register set: the original exit
+                // requirement is to persist ALL registers. `#### Core CSRs`
+                // above stays for compatibility; the remaining CSRs follow.
+                let _ = writeln!(buf, "#### Vector Registers");
+                for i in 0..32 {
+                    let _ = write!(buf, "v{:<2} 0x", i);
+                    if let Some(bytes) = hart.v.read_bytes(i) {
+                        for byte in bytes {
+                            let _ = write!(buf, "{:02x}", byte);
+                        }
+                    }
+                    let _ = writeln!(buf);
+                }
+                let _ = writeln!(buf);
+
+                let _ = writeln!(buf, "#### Vector State");
+                let _ = writeln!(buf, "vl   {}", hart.vector_state.vl);
+                let _ = writeln!(buf, "sew  {} bits", hart.vector_state.sew);
+                let _ = writeln!(buf, "lmul {}", hart.vector_state.lmul);
+                // CSR-level vector state (vstart/vxsat/vxrm/vcsr/vl/vtype/vlenb)
+                // is listed in `#### Additional CSRs` below.
+                let _ = writeln!(buf);
+
+                let _ = writeln!(buf, "#### Additional CSRs");
+                // Keep in sync with `Hart::read_csr` (hart.rs): every address
+                // below must be implemented there. The seven core CSRs above
+                // are intentionally excluded to avoid duplicate lines.
+                const ADDITIONAL_CSRS: &[(u64, &str)] = &[
+                    // User CSRs
+                    (0x000, "ustatus"),
+                    (0x041, "uepc"),
+                    (0x042, "ucause"),
+                    (0x043, "utval"),
+                    // Vector CSRs
+                    (0x008, "vstart"),
+                    (0x009, "vxsat"),
+                    (0x00A, "vxrm"),
+                    (0x00F, "vcsr"),
+                    // Supervisor CSRs
+                    (0x100, "sstatus"),
+                    (0x104, "sie"),
+                    (0x105, "stvec"),
+                    (0x106, "scounteren"),
+                    (0x140, "sscratch"),
+                    (0x141, "sepc"),
+                    (0x142, "scause"),
+                    (0x143, "stval"),
+                    (0x144, "sip"),
+                    (0x180, "satp"),
+                    // Machine CSRs (excluding the seven core ones)
+                    (0x301, "misa"),
+                    (0x302, "medeleg"),
+                    (0x303, "mideleg"),
+                    (0x304, "mie"),
+                    (0x305, "mtvec"),
+                    (0x306, "mcounteren"),
+                    (0x340, "mscratch"),
+                    (0x344, "mip"),
+                    (0xF11, "mvendorid"),
+                    (0xF12, "marchid"),
+                    (0xF13, "mimpid"),
+                    // Vector configuration/status CSRs
+                    (0xC20, "vl"),
+                    (0xC21, "vtype"),
+                    (0xC22, "vlenb"),
+                ];
+                for &(addr, name) in ADDITIONAL_CSRS {
+                    let _ = writeln!(
+                        buf,
+                        "{:<9} 0x{:016x} (0x{:03x})",
+                        name,
+                        hart.read_csr(addr),
+                        addr
+                    );
+                }
+                let _ = writeln!(buf);
+            }
+        }
+
+        std::fs::write(output, buf)
+    }
+
+    /// Session-level exit code, computed from per-hart end states.
+    ///
+    /// Rules: any execution error wins (`1`); otherwise the first non-zero
+    /// `exit_code` in ascending hart order; `0` when every hart exited cleanly
+    /// (including running off the end of the text section).
+    #[must_use]
+    pub fn session_exit_code(&self) -> i64 {
+        let harts = self.get_all_harts();
+        if harts.iter().any(|(_, h)| h.error_info.is_some()) {
+            return 1;
+        }
+        let mut ordered: Vec<(HartId, Option<i64>)> =
+            harts.iter().map(|(_, h)| (h.id, h.exit_code)).collect();
+        ordered.sort_by_key(|(id, _)| *id);
+        ordered
+            .iter()
+            .find_map(|(_, code)| code.filter(|c| *c != 0))
+            .unwrap_or(0)
     }
 
     /// Return the clock value of processor 0 (backward-compatible convenience).
@@ -828,6 +1024,7 @@ impl Machine {
         hart.csr = crate::machine::hart::CsrFile::default();
         hart.csr.mhartid = saved_mhartid;
         hart.error_info = None;
+        hart.exit_code = None;
         hart.finish_clock = None;
         hart.pc = entry_point;
         // P0-4: Align elapsed_cycles to the current processor clock, NOT zero.
@@ -4009,15 +4206,56 @@ impl Machine {
                 self.set_x(hart_id, inst.get_r0(), old_val)?;
                 self.next_pc(hart_id)?;
             }
-            // ECALL: Environment call (trap to higher privilege)
+            // ECALL: Environment call.
+            //
+            // Two interpretations coexist:
+            //   * Linux RISC-V syscall convention — `a7 == 93` (__NR_exit) ends
+            //     the calling hart; `a7 == 94` (__NR_exit_group) ends every hart
+            //     on the machine (across all processors), matching process-wide
+            //     termination semantics used by gcc/clang-compiled programs.
+            //   * Any other `a7` keeps the original behaviour: trap to the
+            //     environment (so programs with their own trap handlers are
+            //     unaffected).
             OpCode::Ecall => {
-                let hart = self.get_hart_mut(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?;
-                let cause = match hart.privilege {
-                    PrivilegeLevel::User => EXCEPTION_ENVIRONMENT_CALL_FROM_U,
-                    PrivilegeLevel::Supervisor => EXCEPTION_ENVIRONMENT_CALL_FROM_S,
-                    PrivilegeLevel::Machine => EXCEPTION_ENVIRONMENT_CALL_FROM_M,
+                let (a7, a0) = {
+                    let hart = self.get_hart(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?;
+                    (hart.x.read(17), hart.x.read(10)) // x17 == a7, x10 == a0
                 };
-                hart.take_trap(cause, hart.pc as u64, false);
+                match a7 {
+                    93 | 94 => {
+                        // Normal, program-requested termination: error_info stays None.
+                        if a7 == 93 {
+                            // exit: only the calling hart stops.
+                            if let Some(hart) = self.get_hart_mut(hart_id) {
+                                hart.exit_code = Some(a0 as i64);
+                            }
+                            self.finish_hart(hart_id, None);
+                        } else {
+                            // exit_group: stop every hart on the machine. This is
+                            // process-wide termination and takes effect across ALL
+                            // processors, not just the caller's. Only the calling
+                            // hart owns the exit code; the others are killed
+                            // without one so the dump cannot mislead.
+                            let all_ids: Vec<HartId> =
+                                self.get_all_harts().iter().map(|(_, h)| h.id).collect();
+                            for id in all_ids {
+                                if let Some(hart) = self.get_hart_mut(id) {
+                                    hart.exit_code = if id == hart_id { Some(a0 as i64) } else { None };
+                                }
+                                self.finish_hart(id, None);
+                            }
+                        }
+                    }
+                    _ => {
+                        let hart = self.get_hart_mut(hart_id).ok_or(DebuggerError::HartNotFound { hart_id })?;
+                        let cause = match hart.privilege {
+                            PrivilegeLevel::User => EXCEPTION_ENVIRONMENT_CALL_FROM_U,
+                            PrivilegeLevel::Supervisor => EXCEPTION_ENVIRONMENT_CALL_FROM_S,
+                            PrivilegeLevel::Machine => EXCEPTION_ENVIRONMENT_CALL_FROM_M,
+                        };
+                        hart.take_trap(cause, hart.pc as u64, false);
+                    }
+                }
             }
             // EBREAK: Environment breakpoint
             OpCode::Ebreak => {
